@@ -27,7 +27,7 @@ public final class CatalogExportDemo {
     public static void main(String[] args) throws Exception {
         List<Product> products = ProductCatalogGenerator.generate();
 
-        try (PrintWriter out = new PrintWriter(Path.of("catalog-export.json").toFile(), StandardCharsets.UTF_8)) {
+        try (PrintWriter out = new PrintWriter(Path.of("search-experiments", "catalog-export.json").toFile(), StandardCharsets.UTF_8)) {
             out.println("[");
             for (int i = 0; i < products.size(); i++) {
                 Product p = products.get(i);
@@ -55,7 +55,7 @@ public final class CatalogExportDemo {
             out.println("]");
         }
 
-        System.out.println("Exported " + products.size() + " products to catalog-export.json");
+        System.out.println("Exported " + products.size() + " products to search-experiments/catalog-export.json");
     }
 
     private static String json(String s) {

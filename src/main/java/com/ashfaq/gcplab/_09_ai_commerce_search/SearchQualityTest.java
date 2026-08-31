@@ -18,7 +18,8 @@ import java.util.List;
  * a need rather than a product name, C) queries mentioning weight/volume,
  * D) queries mentioning apparel/diaper sizes (S/M/L/XL/XXL). Top 3 results
  * per query, enriched with titles via a follow-up GetProduct call (search
- * itself only returns IDs). Output written to search-quality-results.txt
+ * itself only returns IDs). Output written to
+ * search-experiments/ai-commerce-search-results.txt
  * for manual relevance scoring afterward.
  *
  * Run with:
@@ -148,7 +149,7 @@ public final class SearchQualityTest {
     }
 
     public static void main(String[] args) throws Exception {
-        Path outPath = Path.of("search-quality-results.txt");
+        Path outPath = Path.of("search-experiments", "ai-commerce-search-results.txt");
 
         try (SearchServiceClient searchClient = SearchServiceClient.create();
              ProductServiceClient productClient = ProductServiceClient.create();

@@ -95,7 +95,7 @@
  * of 25 was reused - the SAME query numbers and text as 6-7 per bucket from
  * {@code _09}'s original 100, so results sit side by side against real,
  * already-scored Vertex output (see {@code _09_ai_commerce_search}'s
- * {@code search-quality-results.txt}). Query shape: a plain
+ * {@code search-experiments/ai-commerce-search-results.txt}). Query shape: a plain
  * {@code multi_match} across {@code title^2}, {@code description},
  * {@code attribute} - no synonyms, no custom analyzer, no tuning. The intent
  * was an honest "what you get for free" comparison on both sides, not a
@@ -178,10 +178,10 @@
  * endpoint confirmed exactly 703 documents landed; every one of the 25
  * queries in {@code SearchQualityCompareDemo} was actually sent over HTTP
  * to the live node and its real top-3 titles captured verbatim into
- * {@code elasticsearch-quality-results.txt} before scoring; the AI Commerce
+ * {@code search-experiments/elasticsearch-results.txt} before scoring; the AI Commerce
  * Search side of the comparison is the same real, already-executed output
  * captured in {@code _09_ai_commerce_search}'s {@code
- * search-quality-results.txt} (including its genuine {@code NO RESULTS}
+ * search-experiments/ai-commerce-search-results.txt} (including its genuine {@code NO RESULTS}
  * rows), not a re-imagined or re-scored version of it. Both raw output
  * files are kept in the repo root (not gitignored) specifically so the
  * scores above can be checked against the actual returned data rather than

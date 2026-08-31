@@ -81,7 +81,7 @@ public final class SearchQualityCompareDemo {
     public static void main(String[] args) throws Exception {
         HttpClient http = HttpClient.newHttpClient();
 
-        try (PrintWriter out = new PrintWriter(Path.of("elasticsearch-quality-results.txt").toFile(), StandardCharsets.UTF_8)) {
+        try (PrintWriter out = new PrintWriter(Path.of("search-experiments", "elasticsearch-results.txt").toFile(), StandardCharsets.UTF_8)) {
             for (TestQuery q : QUERIES) {
                 String searchBody = """
                         {
@@ -108,7 +108,7 @@ public final class SearchQualityCompareDemo {
                 out.println(line);
             }
         }
-        System.out.println("Written to elasticsearch-quality-results.txt");
+        System.out.println("Written to search-experiments/elasticsearch-results.txt");
     }
 
     private static List<String> extractTitles(String responseBody) {
