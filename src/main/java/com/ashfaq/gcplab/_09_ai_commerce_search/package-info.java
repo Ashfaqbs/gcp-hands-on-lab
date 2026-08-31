@@ -133,7 +133,7 @@
  * catalog contents and scored 0-10 - not a simulated/assumed score.
  * <p>
  * Full scored report (all 100 queries, top result, score, reasoning):
- * <a href="https://claude.ai/code/artifact/3a3a54b4-7bfa-413d-ad1e-a7a2e6c48544">Search Relevance Audit</a>
+ * {@code search-experiments/ai-commerce-search-audit.md}.
  * <p>
  * <b>Results by bucket:</b>
  * <table border="1">

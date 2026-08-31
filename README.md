@@ -50,7 +50,7 @@ queries (7.17/10 vs. 2.83/10), because Vertex's default index needs closer
 literal/phrase alignment while Elasticsearch's stock analyzer catches any
 overlapping word token. Full write-up and raw result files are in
 `_09_ai_commerce_search` and `_10_elasticsearch`'s `package-info.java`,
-alongside a [published relevance audit report](https://claude.ai/code/artifact/3a3a54b4-7bfa-413d-ad1e-a7a2e6c48544).
+alongside the [full 100-query scored audit](search-experiments/ai-commerce-search-audit.md).
 
 ## Running it
 

@@ -52,6 +52,7 @@ search quality on a real-world catalog).
 | `catalog-export.json` | The INPUT - all 703 products (id, title, description, category, brand, price, size/weight attribute) as plain JSON. Generated locally, never touched a network call - the ground truth every result below is judged against. |
 | `ai-commerce-search-results.txt` | OUTPUT of running all 100 queries against Google's AI Commerce Search (managed retail search product) - top-3 result titles per query. |
 | `elasticsearch-results.txt` | OUTPUT of running a stratified 25-query subset (same query numbers/text as a slice of the 100 above) against a self-hosted, untuned Elasticsearch index on the same catalog - top-3 result titles per query. |
+| `ai-commerce-search-audit.md` | The full 100-query scored audit against AI Commerce Search - per-query top result, score, and note on why, grouped by bucket, with the stat summary and headline finding. |
 
 ## What was actually learned
 
@@ -92,7 +93,7 @@ kept next to the code it documents rather than duplicated here):
 
 - `src/main/java/com/ashfaq/gcplab/_09_ai_commerce_search/package-info.java`
 - `src/main/java/com/ashfaq/gcplab/_10_elasticsearch/package-info.java`
-- Published relevance audit report: https://claude.ai/code/artifact/3a3a54b4-7bfa-413d-ad1e-a7a2e6c48544
+- Full 100-query scored audit: `ai-commerce-search-audit.md` (this folder)
 
 A third search approach - real embeddings-based vector search (Vertex AI
 Vector Search) - is planned as a follow-up experiment on this same catalog,
