@@ -11,6 +11,19 @@
  * aiplatform.googleapis.com}), both loosely under Google's historical
  * "Vertex AI" family branding but never called interchangeably.
  *
+ * <h2>Where the raw catalog data actually is</h2>
+ * The 703-product catalog itself was never persisted anywhere - it was
+ * generated in-memory by {@code ProductCatalogGenerator} and streamed
+ * straight into the Retail API's import call, so there was no local file
+ * to actually eyeball and judge for data quality (only the search RESULT
+ * titles were visible, via {@code search-quality-results.txt}). Fixed with
+ * {@code CatalogExportDemo}, which dumps the exact same generator output to
+ * {@code catalog-export.json} (all 703 products, plain JSON array - id,
+ * title, description, category, brand, price, and the size/weight
+ * attribute where applicable) purely as a local export, no API call
+ * involved. This is the file to open if you want to judge the synthetic
+ * data's realism directly rather than inferring it from search results.
+ *
  * <h2>Naming history (third rename we've hit in this repo)</h2>
  * Vertex AI Search for Retail -&gt; Vertex AI Search for Commerce -&gt;
  * Console currently shows "AI Commerce Search" (as of 2026-08-31). The API
