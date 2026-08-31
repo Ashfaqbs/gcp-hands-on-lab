@@ -26,6 +26,13 @@ what's metered, a formula, and where to check current pricing.
 | 09 | [`_09_ai_commerce_search`](src/main/java/com/ashfaq/gcplab/_09_ai_commerce_search) | AI Commerce Search (Retail) | 703-product synthetic catalog, 100-query relevance audit |
 | 10 | [`_10_elasticsearch`](src/main/java/com/ashfaq/gcplab/_10_elasticsearch) | Elasticsearch (self-hosted) | Same catalog, same queries, compared head-to-head against module 09 |
 
+## What's next
+
+[`docs/roadmap.md`](docs/roadmap.md) - three planned tracks: a shopping-
+assistant capstone (wiring module 08's agent loop to module 09's search as
+a tool), an ML-fundamentals-through-Vertex-AI sequence, and Vertex AI
+Vector Search as a third catalog-search comparison alongside modules 09/10.
+
 ## Cross-cutting docs
 
 - [`docs/gcp-hierarchy.md`](docs/gcp-hierarchy.md) - org/folder/project/resource + separate billing-account tree
