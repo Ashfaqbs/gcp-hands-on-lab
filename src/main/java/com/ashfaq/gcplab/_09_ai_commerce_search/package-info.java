@@ -531,5 +531,149 @@
  *       searchability are two separate pipelines) - wait and re-check
  *       before assuming the import silently failed.</li>
  * </ul>
+ *
+ * <h2>FAQ: how this actually behaves as a service (answered from real usage)</h2>
+ *
+ * <p><b>1. Is this "add data + search," or full CRUD - and how, exactly
+ * (SQL? code? sync? async?)</b> Full CRUD on Product, but there is NO SQL
+ * or query-language admin interface at all, unlike Cloud SQL's psql/Studio
+ * or even Firestore's Console data browser - every single operation, admin
+ * or search, goes through the API (REST, gRPC, or a generated client
+ * library like the Java {@code ProductServiceClient}/{@code
+ * SearchServiceClient} this module uses) or the Console UI, which itself
+ * is just a thin wrapper calling that same API. There is no third way in.
+ * The operations, and their sync/async shape:
+ * <ul>
+ *   <li><b>Create</b> - {@code CreateProduct} (one product) is a normal
+ *       SYNCHRONOUS unary call, returns immediately with the created
+ *       resource. {@code ImportProducts} (bulk, what {@link
+ *       CatalogImportDemo} uses for all 703) is ASYNCHRONOUS - it returns a
+ *       long-running {@code Operation} you poll until {@code done=true},
+ *       same shape as a Cloud Storage batch job or a database bulk-load
+ *       job; never assume a bulk import finished just because the initial
+ *       call returned.</li>
+ *   <li><b>Read</b> - {@code GetProduct} (single, by ID) and {@code
+ *       ListProducts} (paginated, all products in a branch) are both
+ *       SYNCHRONOUS. There is also {@code ExportProducts} (bulk export to
+ *       GCS) which, like Import, is ASYNCHRONOUS.</li>
+ *   <li><b>Update</b> - {@code UpdateProduct} (a normal PATCH-style
+ *       synchronous call, field mask controls which fields change - not
+ *       used in this module's demos, which only ever created and purged,
+ *       never updated a single product in place) - a real, if unexercised,
+ *       part of the CRUD surface.</li>
+ *   <li><b>Delete</b> - {@code DeleteProduct} (single, SYNCHRONOUS) and
+ *       {@code PurgeProducts} (bulk, by filter - {@link CatalogPurgeDemo}
+ *       used {@code filter="*"} to wipe all 703 in one call - ASYNCHRONOUS,
+ *       same Operation-polling pattern as import).</li>
+ *   <li><b>Search</b> (the read path shoppers actually hit) - {@code
+ *       Search} is SYNCHRONOUS, but paginated (page size, page token) -
+ *       there's no "search everything async and get a callback" mode, it's
+ *       a normal request/response call you'd put behind a search box's
+ *       backend endpoint directly.</li>
+ * </ul>
+ * The pattern to remember: single-item, low-latency operations (create one
+ * product, search, get, update, delete one product) are synchronous unary
+ * calls; whole-catalog, potentially-slow operations (import, export, purge)
+ * are asynchronous long-running operations you poll - the exact same split
+ * this repo already hit as a real SDK quirk during catalog import (see
+ * "Catalog import" above).
+ *
+ * <p><b>2. Is it designed to handle real volume?</b> Yes - this is the same
+ * infrastructure family powering Google's own Shopping search at planet
+ * scale, not a bolted-on feature. Concretely (see "Scale limits" above,
+ * sourced from Google's official quotas page): up to 4,000,000 products
+ * with search enabled (40,000,000 with it disabled), 12,000 product writes/
+ * minute, and a default 300 searches/minute PER PROJECT that is explicitly
+ * a raisable soft quota, not a hard architectural ceiling - Google's own
+ * documented path for a busier storefront is simply requesting a quota
+ * increase, the same mechanism used across every GCP API, not a re-
+ * architecture. This module's 703-product catalog and handful of test
+ * queries never came remotely close to any of these numbers.
+ *
+ * <p><b>3. When volume increases, does accuracy decrease?</b> Two
+ * DIFFERENT kinds of "volume" answer this differently - conflating them is
+ * the easy mistake:
+ * <ul>
+ *   <li><b>Catalog size (more products)</b> - does NOT degrade retrieval
+ *       accuracy by itself. The underlying index scales the same way any
+ *       large-scale inverted/structured index does (see {@code
+ *       _10_elasticsearch}'s internal-architecture notes on how an
+ *       inverted index works - Google's version is the same idea at much
+ *       larger scale) - a query for "basmati rice" finds the same matching
+ *       products whether the catalog has 700 or 7 million items. What DOES
+ *       get harder as catalog size grows is RANKING among many similar
+ *       candidates (which of 500 near-identical rice products should rank
+ *       #1) - that's a ranking-signal problem, not a retrieval-accuracy
+ *       problem, and it's exactly what business rules, learned ranking, and
+ *       personalization (below) exist to solve.</li>
+ *   <li><b>Query/traffic volume (more searches, more shoppers)</b> - does
+ *       NOT degrade accuracy either, and this module's own 100-query test
+ *       vs. a hypothetical million-query day would return identically
+ *       relevant results for the SAME query text - Search is a stateless
+ *       read path with no accuracy cost that scales with QPS (only cost-in-
+ *       dollars and quota scale with QPS, not result quality).</li>
+ * </ul>
+ * The honest nuance: what genuinely changes result quality over time is not
+ * "volume" in either sense above, but the presence (or absence) of
+ * user-behavior SIGNAL - see the next question, since this module's own
+ * results are a live demonstration of exactly that gap.
+ *
+ * <p><b>4. Does it get better eventually, and how - explained via this
+ * module's own experiment?</b> Yes, but ONLY if it's fed real UserEvents
+ * (search impressions, clicks, add-to-cart, purchases - see "UserEvents"
+ * above) - the product layers a LEARNED RANKING model on top of the
+ * baseline text-match retrieval, trained continuously on what shoppers
+ * actually click and buy for a given query, the same "learning to rank
+ * from real behavior" idea behind Google's own web/Shopping search
+ * improving over years of real traffic. This is a genuinely different
+ * mechanism from a static algorithm getting "smarter" on its own - it
+ * requires a feedback loop of real signal, same as any recommendation
+ * system.
+ * <p>
+ * This directly explains this module's own 100-query audit finding (7.65/10
+ * overall, and the 40%-zero-results problem on descriptive queries): {@code
+ * default_search} was queried against a catalog with ZERO UserEvent
+ * history - a textbook COLD START, the state every new retail integration
+ * starts in before any real shoppers have used it. What the audit actually
+ * measured was the product's UNLEARNED baseline - pure text-matching
+ * behavior with no ranking model trained on this catalog's specific query
+ * patterns yet, because there was no signal to train on. In a real
+ * deployment, the SAME queries run again after weeks/months of real
+ * shopper traffic (clicks confirming "yes, that dandruff query should have
+ * surfaced the anti-dandruff shampoo") would be expected to improve on
+ * exactly the failure cases this audit caught - not because Google changed
+ * anything, but because the product would finally have the behavioral
+ * signal its learned-ranking layer needs. This module deliberately never
+ * generated fake events specifically so the cold-start baseline could be
+ * measured honestly (see docs/roadmap.md's note on synthesizing UserEvents
+ * as a legitimate, still-open follow-up to actually observe this
+ * improvement rather than just theorize about it).
+ *
+ * <p><b>5. Do search results come with a relevance/matching score, and how
+ * do you get it?</b> Confirmed against Google's own API reference
+ * ({@code docs.cloud.google.com/retail/docs/reference/rest/v2/
+ * SearchResponse}, fetched directly for this answer): each {@code
+ * SearchResult} has a {@code modelScores} field - a map of
+ * {@code string -&gt; DoubleList} that Google's reference docs describe only
+ * as "Google provided available scores," without documenting the exact key
+ * names, value semantics, or scale (e.g. no confirmation it's 0-1
+ * normalized, or comparable across queries the way Elasticsearch's BM25
+ * {@code _score} is designed to be within one query). This is a real,
+ * present field - unlike the pricing figures elsewhere in this file, this
+ * one IS sourced from the primary API reference - but it is deliberately
+ * under-documented on Google's side, and this module's own {@link
+ * SearchQualityTest} never requested or inspected it (every one of the 100
+ * scores in the audit is a HUMAN judgment of relevance, reading the
+ * returned product titles, not anything the API reported numerically).
+ * Practical takeaway: {@code modelScores} is there to inspect
+ * (deserialize the SearchResult and print the map) if debugging why one
+ * result outranked another, but should not be treated as a stable,
+ * documented contract to build product logic on (e.g. "only show results
+ * scoring above 0.7") the way you might confidently threshold an
+ * Elasticsearch {@code _score} - verify its current behavior directly
+ * against a real response before depending on it, and prefer Google's own
+ * ranking ORDER (the array order of results, which is the actual, fully-
+ * supported relevance signal) over trying to reverse-engineer meaning from
+ * this map.
  */
 package com.ashfaq.gcplab._09_ai_commerce_search;
