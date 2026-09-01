@@ -197,5 +197,67 @@
  * Verified via {@code gcloud compute instances list} and
  * {@code gcloud compute firewall-rules list} returning to the pre-module
  * state (only the four GCP-default firewall rules remain, zero instances).
+ *
+ * <h2>Internal architecture: what "index a document" and "run a query" actually do</h2>
+ * Elasticsearch is a distributed layer wrapped around Apache Lucene, and
+ * almost everything about its behavior traces back to Lucene's data
+ * structure - the INVERTED INDEX:
+ * <pre>
+ * CatalogIndexDemo -&gt; PUT /products/_doc/p204 (one JSON document)
+ *   -&gt; ES routes the document to a SHARD (hash of the doc ID mod shard
+ *      count - single shard here, since this is a 1-node throwaway cluster)
+ *   -&gt; for each {@code text} field (title, description): the ANALYZER runs
+ *      (lowercase -&gt; tokenize on whitespace/punctuation -&gt; here, the stock
+ *      "standard" analyzer, no stemming/synonyms configured) producing a
+ *      list of TERMS
+ *   -&gt; each term is added to the shard's inverted index: term -&gt; list of
+ *      document IDs containing it (the literal reverse of "document -&gt;
+ *      list of terms," hence "inverted") - this is WHY "dandruff" as a
+ *      substring inside a longer description is instantly findable: the
+ *      analyzer already broke it out into its own standalone term at index
+ *      time, independent of its position or surrounding words
+ *   -&gt; {@code keyword} fields (category/brand/attribute) are stored
+ *      UNANALYZED - the whole string is one term, which is why they match
+ *      only on exact equality and are used for filtering/faceting, never
+ *      partial text search
+ *   -&gt; the write isn't immediately searchable - it lands in an in-memory
+ *      buffer + a translog (for crash durability) and only becomes visible
+ *      to search after the next REFRESH (default every 1s), which is why
+ *      CatalogIndexDemo's bulk load is verified via {@code _count} rather
+ *      than assuming instant visibility
+ * SearchQualityCompareDemo -&gt; multi_match query -&gt; the SAME analyzer runs
+ *   on the QUERY TEXT (so "i need something for my dandruff" tokenizes into
+ *   the same kind of terms as indexing did) -&gt; each shard looks up matching
+ *   terms in its own local inverted index (QUERY phase) -&gt; per-shard
+ *   candidate doc IDs + relevance scores (BM25 by default - term frequency
+ *   weighted by how rare/common the term is across the whole index) are
+ *   merged and re-ranked by the coordinating node -&gt; top document IDs are
+ *   then fetched from the shards holding them (FETCH phase) for the actual
+ *   {@code _source} returned to the client - this two-phase query-then-fetch
+ *   design is why Elasticsearch stays fast even with many shards: the
+ *   expensive full-document fetch only ever happens for the final top-N
+ *   results, never for every candidate considered during scoring.
+ * </pre>
+ * Clustering (not exercised here - this module is deliberately a 1-node
+ * "cluster") adds a MASTER node that owns cluster state (which shards live
+ * on which nodes, index settings) and REPLICA shards (a live copy of a
+ * primary shard on a different node) - a query hits either the primary or
+ * a replica interchangeably for load-balancing, and losing a node only
+ * loses data if it held a primary with zero surviving replicas.
+ *
+ * <h2>System design takeaway</h2>
+ * The single biggest design lever in Elasticsearch is the MAPPING decided
+ * at index-creation time (text vs. keyword vs. numeric, and which analyzer
+ * a text field uses) - unlike a SQL column, a field's type is very hard to
+ * change after documents are already indexed (typically requires a full
+ * reindex into a new index and an alias swap, not an ALTER TABLE). This
+ * module's finding (untuned ES beating untuned AI Commerce Search on
+ * natural-language queries) is really a mapping/analyzer story: the stock
+ * "standard" analyzer's simple whitespace-and-lowercase tokenization
+ * happens to be a strong default for catch-all keyword matching, but a real
+ * production deployment would layer on a custom analyzer (synonyms,
+ * stemming, stop-words, n-grams for typo tolerance) tuned to the actual
+ * catalog's vocabulary - the "zero tuning" comparison in this module is
+ * explicitly the floor both systems start from, not either one's ceiling.
  */
 package com.ashfaq.gcplab._10_elasticsearch;

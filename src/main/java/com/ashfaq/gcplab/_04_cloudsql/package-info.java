@@ -90,5 +90,47 @@
  *       exercise was done - confirmed with a follow-up {@code gcloud sql
  *       instances list} showing zero instances.</li>
  * </ul>
+ *
+ * <h2>Internal architecture: Cloud SQL is a managed VM, not serverless magic</h2>
+ * Unlike GCS or Firestore, a Cloud SQL instance really is one (or, with HA,
+ * two) dedicated Compute Engine VM(s) running a genuine PostgreSQL server
+ * process - Google's management layer just automates everything around it:
+ * <pre>
+ * your code (EmployeeCrudDemo)
+ *   -&gt; Cloud SQL Java Connector (in-process library, wraps the JDBC driver)
+ *      -&gt; Cloud SQL Admin API: "resolve instance X, give me its current
+ *         IP + a client cert" (this call is authenticated via YOUR ADC/IAM
+ *         identity - this is the part that needs cloudsql.instances.connect)
+ *      -&gt; Connector opens a mutually-authenticated TLS tunnel directly to
+ *         the instance's private control-plane endpoint using that
+ *         short-lived cert (rotated automatically ~hourly) - no manual
+ *         firewall rule or public IP needed, and no separate proxy binary
+ *         to run (the old "Cloud SQL Auth Proxy" does the identical thing
+ *         as an external OS process instead of an in-JVM library)
+ *   -&gt; actual SQL traffic (the JDBC protocol, e.g. a native Postgres
+ *      username/password login as used here) flows inside that tunnel to
+ *      the real postgres process on the underlying VM
+ * </pre>
+ * The management layer's real job is everything OUTSIDE that data path:
+ * automated point-in-time-recoverable backups, minor-version patching
+ * during a maintenance window, storage auto-grow on the underlying
+ * persistent disk, and - if HA/regional availability is enabled (not used
+ * here) - a synchronously-replicated standby VM in a second zone with an
+ * internal health-checker that triggers automatic failover (DNS/internal-IP
+ * cutover to the standby) if the primary VM or zone goes down.
+ *
+ * <h2>System design takeaway</h2>
+ * Because it's a real always-on VM under the hood (see the Cost section
+ * above), Cloud SQL's scaling story is fundamentally vertical-first: more
+ * vCPU/memory on the instance, or read replicas fanned out for read-heavy
+ * workloads (each replica is a full separate VM, billed separately, with
+ * asynchronous replication lag - never assume replica reads are
+ * up-to-the-millisecond fresh). This is the right tool when you need real
+ * transactions, joins, and strong relational consistency (see _06_firestore
+ * for the deliberately different, denormalized alternative) - but it does
+ * NOT scale horizontally the way Firestore or GCS do, so a system design
+ * that expects unbounded write throughput on one Cloud SQL instance will
+ * eventually hit a real ceiling that only sharding (an application-level
+ * concern Cloud SQL doesn't automate) can push past.
  */
 package com.ashfaq.gcplab._04_cloudsql;

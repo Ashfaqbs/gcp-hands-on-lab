@@ -51,5 +51,50 @@
  * role -&gt; merge new permissions into the existing set (not overwrite) -&gt;
  * PATCH with {@code updateMask=includedPermissions} so only that field
  * changes.
+ *
+ * <h2>Internal architecture: how IAM actually evaluates "can this call happen?"</h2>
+ * IAM is not a per-service feature bolted onto each API - it's a single
+ * shared control-plane service ({@code iam.googleapis.com} for role/identity
+ * bookkeeping, {@code cloudresourcemanager.googleapis.com} for policy
+ * bindings) that every other GCP API calls into on the hot path of every
+ * single request:
+ * <pre>
+ * caller -&gt; API frontend (e.g. storage.googleapis.com)
+ *        -&gt; authenticate the caller (verify token: OAuth access token,
+ *           short-lived impersonated token, or attached-identity metadata
+ *           token - see _02)
+ *        -&gt; ask the shared IAM policy-evaluation layer: "does this
+ *           principal have permission X on this resource?"
+ *        -&gt; IAM walks the RESOURCE HIERARCHY bottom-up (resource -&gt;
+ *           project -&gt; folder(s) -&gt; organization), unioning every policy
+ *           binding at every level (bindings are additive-only - there is
+ *           no "revoke" binding, only removing a grant or, at the org
+ *           level, an explicit IAM Deny policy which is evaluated first
+ *           and always wins over any Allow)
+ *        -&gt; permission found in the union of (role -&gt; permissions) across
+ *           any binding that matches this principal? -&gt; ALLOW, else DENY
+ *        -&gt; only if ALLOW does the API frontend actually run the requested
+ *           operation
+ * </pre>
+ * A role (what _01_iam builds) is purely a named permission SET stored in
+ * IAM's own metadata store - it is never consulted directly by another
+ * service; only the policy-evaluation step above, at call time, dereferences
+ * a binding's role into its permission list. This is why a role change
+ * (like the {@code UpdateRoleDemo} PATCH above) affects every existing
+ * binding to that role immediately - the permission list is looked up live,
+ * not copied into the binding.
+ *
+ * <h2>System design takeaway</h2>
+ * Treat IAM as a distributed, globally-consistent-ish but NOT
+ * instant-propagation authorization cache in front of every API: changes
+ * typically apply within seconds but Google documents up to ~7 minutes for
+ * full global propagation, which matters for anything that grants-then-
+ * immediately-calls (a retry-with-backoff on the first post-grant call is a
+ * legitimate defensive pattern, not a bug workaround). Because policy
+ * evaluation unions bindings up the whole resource hierarchy, the cheapest
+ * mental model for "why can/can't this identity do X" is: list every
+ * binding at the resource, its project, every folder above it, and the org
+ * - the effective permission set is all of those roles' permissions
+ * combined, not just what's bound directly on the resource in front of you.
  */
 package com.ashfaq.gcplab._01_iam;

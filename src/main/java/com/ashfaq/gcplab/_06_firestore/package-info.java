@@ -139,5 +139,48 @@
  * Pricing reference: {@code cloud.google.com/firestore/pricing} (has a
  * built-in cost calculator; also states the free-tier daily quotas
  * explicitly, which is where the numbers above come from).
+ *
+ * <h2>Internal architecture: built on Spanner, globally strongly consistent</h2>
+ * Firestore is not a single-machine document store - it's Google's document
+ * database layered on the same globally-distributed, synchronously-
+ * replicated infrastructure lineage as Cloud Spanner, which is what lets it
+ * make an unusual promise for a NoSQL document DB: every read (not just
+ * writes) is strongly consistent by default, even across regions, with no
+ * "eventual consistency" caveat to design around the way most distributed
+ * document stores require:
+ * <pre>
+ * EmployeeDocCrudDemo -&gt; Firestore client library -&gt; nearest regional
+ *   Firestore frontend -&gt; the write is committed via a Paxos/TrueTime-style
+ *   consensus protocol across replicas BEFORE the client gets an
+ *   acknowledgement - a subsequent read from ANY replica, anywhere, is
+ *   guaranteed to see that write, not "usually sees it within X ms"
+ * </pre>
+ * Two consequences fall directly out of this architecture: (1) Firestore
+ * AUTOMATICALLY maintains indexes for every field of every document (single-
+ * field indexes are free and automatic; multi-field/composite indexes for
+ * compound queries must be explicitly declared, and Firestore will refuse a
+ * query that needs an index that doesn't exist yet rather than silently
+ * table-scan) - this is the opposite of a SQL DB where indexes are opt-in
+ * and a missing one just means a slow query, not a rejected one; (2)
+ * real-time listeners (not exercised in this module's CRUD demo, but core
+ * to Firestore's design) are implemented as a persistent watch stream from
+ * the same consensus layer - a client subscribes to a query and gets pushed
+ * every subsequent change, which is why Firestore is the default choice for
+ * GCP-backed apps needing live UI updates (chat, collaborative editing,
+ * live dashboards) without hand-rolling polling or a separate pub/sub layer.
+ *
+ * <h2>System design takeaway</h2>
+ * Firestore's "no joins" rule (see above) is a direct consequence of this
+ * architecture too: cross-document consistency across a join would require
+ * the consensus protocol to coordinate across arbitrarily many documents on
+ * every read, which doesn't scale - so the system pushes that cost onto the
+ * DATA MODEL instead (denormalize what you read together into one document,
+ * per the databases.md guidance) rather than the query engine. When
+ * designing a Firestore schema, the right question is never "what's the
+ * normalized shape of this data" (the SQL instinct) but "what does one
+ * screen/API response need to render, and can that live in one document or
+ * one flat query" - get that wrong and you end up doing N sequential reads
+ * in application code to reassemble what a single SQL JOIN would have done
+ * in one round trip.
  */
 package com.ashfaq.gcplab._06_firestore;

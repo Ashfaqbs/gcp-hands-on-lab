@@ -162,5 +162,58 @@
  * code here. Left in place at the user's choice; lower-risk than a GCP
  * service account key since it's scoped to generative API access only,
  * not broad project access - still worth knowing it's there.
+ *
+ * <h2>Internal architecture: what happens between a prompt and a response</h2>
+ * <pre>
+ * GeminiPromptDemo -&gt; ImpersonatedCredentials token (as data-ml-sa) -&gt;
+ *   aiplatform.googleapis.com generateContent/streamGenerateContent
+ *   -&gt; request routed to a Google-managed prediction cluster serving the
+ *      requested model (gemini-*-flash here) - you never provision or see
+ *      this infrastructure; it's shared, multi-tenant, autoscaled capacity
+ *      Google operates centrally, the same serving stack behind AI Studio,
+ *      the Gemini app, and every other Gemini-API surface
+ *   -&gt; tokenization -&gt; forward pass through the model -&gt; tokens streamed
+ *      back incrementally (streamGenerateContent) so the client can render
+ *      partial output before generation finishes, rather than waiting for
+ *      the whole response
+ * </pre>
+ * {@code SimpleRagDemo}'s hand-rolled retrieval is a miniature version of
+ * what a production RAG system does at scale: embed(document) once at index
+ * time -&gt; store the vector -&gt; embed(query) at request time -&gt; nearest-
+ * neighbor search across stored vectors (a linear cosine-similarity scan
+ * here, since there were only 4 candidates; a real system swaps this one
+ * step for an approximate-nearest-neighbor index like Vertex AI Vector
+ * Search, see docs/roadmap.md Track C) -&gt; the top result(s) get concatenated
+ * into the prompt as context -&gt; THEN the augmented prompt goes through the
+ * exact same generateContent path as the plain prompt above. The model
+ * itself has no separate "RAG mode" - RAG is entirely a client-side pattern
+ * of what you put in the prompt before calling the same API.
+ * <p>
+ * {@code SimpleAgentDemo}'s tool-calling loop reveals the actual protocol
+ * under "function calling": the model doesn't execute code - it returns a
+ * structured {@code functionCall} object (name + arguments) INSTEAD of text
+ * when it decides a declared tool would help, the calling code (our Java,
+ * not Google's infrastructure) executes the real function locally, and the
+ * result is fed back into a NEW generateContent call as a
+ * {@code functionResponse} turn - the model then produces its final answer
+ * having "seen" the tool's real output. An "agent" is this loop (call model
+ * -&gt; maybe get a tool request -&gt; execute it -&gt; call model again with the
+ * result -&gt; repeat until a plain text answer comes back) run to convergence
+ * or a max-iteration cap; ADK (Google's Agent Development Kit) automates
+ * exactly this loop instead of hand-writing it as SimpleAgentDemo does here.
+ *
+ * <h2>System design takeaway</h2>
+ * Every capability in this module - raw prompting, RAG, agentic tool use -
+ * is built from the SAME single primitive (one stateless generateContent
+ * call) composed differently at the CLIENT layer, not different backend
+ * products. That means the real system-design decisions live entirely on
+ * your side of the API: how you chunk and store embeddings (RAG), how many
+ * tool round-trips you allow before giving up (agent loop max-iterations,
+ * critical for cost control - each round-trip is a full billed call), and
+ * how much conversation history you resend on every call (Gemini has no
+ * server-side session memory between calls unless you explicitly use a
+ * stateful feature like Live API sessions - by default, YOU resend the
+ * whole conversation, and that resent history is billed as input tokens
+ * every single time).
  */
 package com.ashfaq.gcplab._08_vertexai;

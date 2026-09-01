@@ -99,5 +99,46 @@
  *       Confirmed via {@code gcloud redis instances list} / {@code gcloud
  *       compute instances list} both returning zero items.</li>
  * </ul>
+ *
+ * <h2>Internal architecture: a real Redis process, VPC-fenced by design</h2>
+ * Memorystore is not a proprietary reimplementation - it runs the actual
+ * open-source Redis engine on Google-managed infrastructure, which is why
+ * any standard Redis client (Jedis here) works with zero GCP-specific code:
+ * <pre>
+ * CacheCrudDemo -&gt; SSH tunnel (local:6379 -&gt; bastion VM:22 -&gt; Redis
+ *   private IP:6379) -&gt; real Redis server process, single-threaded event
+ *   loop (Redis's own execution model - one command executed at a time per
+ *   shard, which is exactly why individual commands are effectively atomic
+ *   with no client-side locking needed) -&gt; in-memory keyspace (DB 0-15)
+ * </pre>
+ * Because the whole dataset lives in RAM, durability is optional and
+ * bolted on rather than fundamental the way it is for Cloud SQL/Firestore:
+ * Basic tier (used here) has NO persistence and NO replica at all - an
+ * instance restart or the underlying VM failing loses everything, which is
+ * exactly the deal a cache is supposed to make (fast, cheap, disposable,
+ * backed by a real source of truth elsewhere). Standard/HA tier adds a
+ * synchronously-tracked replica in a second zone plus periodic RDB
+ * snapshotting to persistent storage, so a failure triggers automatic
+ * failover instead of a cold, empty cache. Memorystore is deliberately
+ * NEVER reachable outside its VPC (no public IP, no Cloud SQL-Connector-
+ * style tunneling library) - Google's own reasoning is that a cache's
+ * whole value proposition (sub-millisecond latency) evaporates the moment
+ * it's reached over the public internet, so the product doesn't offer that
+ * path at all; the bastion-VM SSH tunnel this module used is purely a
+ * developer-laptop workaround, never how a real deployed app talks to it.
+ *
+ * <h2>System design takeaway</h2>
+ * A cache-aside pattern (app checks Redis first, falls back to the real DB
+ * on a miss, writes the DB then populates/invalidates the cache) only works
+ * if the app can tolerate the cache being empty or wrong for a short window
+ * - design the TTL and invalidation strategy BEFORE reaching for Redis, not
+ * after a stale-data bug shows up in production. Because Redis is
+ * single-threaded per shard, a single very large or slow command (an
+ * unbounded {@code KEYS *}, a huge {@code SORT}) blocks every other client
+ * on that shard for its full duration - the practical system-design rule is
+ * "small values, O(1)/O(log n) operations, never a table scan," and reach
+ * for Memorystore's cluster mode (sharding across multiple nodes, not used
+ * in this module's single Basic-tier instance) only once a single node's
+ * memory or single-threaded throughput genuinely becomes the bottleneck.
  */
 package com.ashfaq.gcplab._05_redis;

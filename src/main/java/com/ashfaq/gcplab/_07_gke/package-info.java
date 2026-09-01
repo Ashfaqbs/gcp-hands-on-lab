@@ -114,5 +114,53 @@
  * clusters list} (zero), {@code gcloud compute forwarding-rules list}
  * (zero - no orphaned LB), and {@code gcloud compute instances list}
  * (zero - no leftover Autopilot-provisioned nodes).
+ *
+ * <h2>Internal architecture: what "managed Kubernetes" actually manages</h2>
+ * <pre>
+ * kubectl apply -f hello-app.yaml
+ *   -&gt; kube-apiserver (the CONTROL PLANE - entirely Google-hosted, you never
+ *      see or pay directly for its VMs; it's the single source of truth,
+ *      backed by etcd, also fully Google-managed and never directly
+ *      reachable)
+ *   -&gt; scheduler watches for unscheduled Pods -&gt; picks a node (Standard) or
+ *      TRIGGERS NEW NODE PROVISIONING (Autopilot - this is why "kubectl get
+ *      nodes" showed nothing until the Deployment was applied: Autopilot
+ *      doesn't pre-provision capacity, it reacts to actual pending pods)
+ *   -&gt; kubelet (an agent on every node, Google-managed on Autopilot) pulls
+ *      the container image and starts it, reports status back to the API
+ *      server
+ *   -&gt; Service type=LoadBalancer -&gt; GKE's cloud-controller-manager
+ *      component watches for these and calls the Compute Engine API on your
+ *      behalf to provision a REAL external L4 load balancer + forwarding
+ *      rule - this is a separate GCP resource, separately billed, which is
+ *      exactly why deleting the Deployment/Service first (before the
+ *      cluster) matters: it lets that controller clean up the LB properly
+ *      instead of leaving an orphaned forwarding rule behind
+ * </pre>
+ * Networking underneath is VPC-native (IP alias ranges) by default: every
+ * Pod gets a real routable IP straight from the VPC's secondary range
+ * rather than an overlay network requiring extra encapsulation - this is
+ * why Pods can be reached directly by IP from elsewhere in the VPC and why
+ * Pod IP exhaustion is a real capacity-planning concern (the secondary
+ * range size caps how many Pods a cluster can ever run, decided at cluster
+ * creation, not resizable after the fact).
+ *
+ * <h2>System design takeaway</h2>
+ * The whole point of the control-plane/data-plane split is that a
+ * Deployment's declared state (1 replica, this image, these resource
+ * requests) is a DESIRED state the control plane continuously reconciles
+ * toward - not a one-time command. Kill the pod and the Deployment
+ * controller notices the actual state has drifted from desired and
+ * recreates it, with zero code of ours involved; this reconciliation loop
+ * (desired vs. actual, continuously re-converged) is the core Kubernetes
+ * design pattern and the reason it's the default choice for anything that
+ * needs to self-heal without a human or a separate orchestration script.
+ * Autopilot's real trade is giving up node-level control (no SSH to nodes,
+ * no DaemonSets needing host access, mandatory resource requests on every
+ * container) in exchange for never capacity-planning nodes yourself - the
+ * right call for most application workloads; Standard mode earns its extra
+ * complexity only when something genuinely needs node-level access
+ * (custom kernel modules, specific machine types/GPUs Autopilot doesn't
+ * offer, DaemonSet-based infrastructure agents).
  */
 package com.ashfaq.gcplab._07_gke;

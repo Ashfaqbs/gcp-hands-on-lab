@@ -76,5 +76,47 @@
  *   <li>Enabled APIs required along the way: {@code
  *       storage.googleapis.com}.</li>
  * </ul>
+ *
+ * <h2>Internal architecture: what GCS is actually built on</h2>
+ * Cloud Storage is not "a filesystem in the cloud" internally - it's a flat
+ * key-value object store layered over Google's internal distributed storage
+ * stack (historically Colossus, Google's successor to GFS), fronted by a
+ * globally-anycast HTTP(S) API:
+ * <pre>
+ * client (BucketDemo/ObjectDemo) -&gt; storage.googleapis.com (single global
+ *   anycast endpoint - your request is routed to the nearest Google edge,
+ *   not to a region-specific hostname)
+ *   -&gt; metadata layer resolves bucket -&gt; object -&gt; which storage cells
+ *      actually hold the bytes (metadata itself lives in a strongly
+ *      consistent, globally replicated index - this is WHY GCS offers
+ *      strong read-after-write consistency for both metadata AND data,
+ *      unlike S3's historical eventual consistency)
+ *   -&gt; object bytes are erasure-coded and striped across many physical
+ *      disks/machines within the bucket's chosen region(s) - a single disk
+ *      or even a whole machine failing loses nothing; multi-region buckets
+ *      replicate the erasure-coded shards across geographically separate
+ *      regions for disaster tolerance
+ *   -&gt; an upload (PutObject/resumable upload) is only acknowledged back to
+ *      the client once enough shards are durably written to survive the
+ *      bucket's declared durability SLA (11 nines annual durability) - this
+ *      is why writes have real latency even though reads can be very fast
+ * </pre>
+ * "Uniform bucket-level access" (used in this module) means every request's
+ * authorization decision is answered purely by IAM policy evaluation (see
+ * _01_iam) at the bucket resource - no per-object ACL lookup ever happens,
+ * which is both simpler and removes an entire class of "public object
+ * despite a private bucket" misconfiguration that legacy ACL mode allows.
+ *
+ * <h2>System design takeaway</h2>
+ * Because GCS is metadata-indexed rather than filesystem-hierarchical, "list
+ * objects with prefix X" is a metadata-index range scan, not a directory
+ * walk - cheap and fast at any bucket size, but this also means there's no
+ * real atomic "rename a folder" operation (renaming N objects sharing a
+ * prefix is N separate copy+delete calls under the hood, whatever tool you
+ * use). Design object KEYS deliberately: a well-chosen prefix scheme (e.g.
+ * date-partitioned keys for a data lake, or a hash prefix to spread very
+ * high write-throughput across storage cells) is the single biggest lever
+ * over GCS performance/cost at scale, since there is no schema or index to
+ * tune the way there is in a database - the key namespace IS the index.
  */
 package com.ashfaq.gcplab._03_storage;

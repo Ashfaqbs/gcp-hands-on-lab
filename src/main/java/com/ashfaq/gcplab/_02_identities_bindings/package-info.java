@@ -94,5 +94,47 @@
  *       iamcredentials.googleapis.com} (the latter specifically for
  *       impersonation's {@code generateAccessToken} call).</li>
  * </ul>
+ *
+ * <h2>Internal architecture: what impersonation actually does on the wire</h2>
+ * {@link IamPermissionTestDemo} never holds backend-dev-sa's key material -
+ * nothing like that exists for impersonation. Instead:
+ * <pre>
+ * caller's own ADC credential (human login or another SA)
+ *   -&gt; IAM Credentials API: generateAccessToken(target=backend-dev-sa)
+ *      [requires roles/iam.serviceAccountTokenCreator ON the target SA]
+ *   -&gt; STS-style token exchange happens server-side inside Google's
+ *      identity infrastructure - the caller's identity is verified, then
+ *      checked against the target SA's IAM policy for TokenCreator, then a
+ *      brand-new SHORT-LIVED (default 1hr) OAuth access token is minted
+ *      that is indistinguishable, to any downstream API, from a token the
+ *      SA generated for itself
+ *   -&gt; that token is attached to every subsequent call (e.g. testIamPermissions)
+ *      -&gt; the downstream API's IAM check (see _01_iam's evaluation flow)
+ *         runs against backend-dev-sa's identity and bindings, NOT the
+ *         original caller's
+ * </pre>
+ * This is exactly the same mechanism GCP's own services use internally for
+ * attached identity (Compute Engine's metadata server is, under the hood,
+ * a local proxy that calls this same token-minting machinery on the VM's
+ * behalf) - impersonation, key files, and attached identity all converge on
+ * "produce a valid OAuth access token for the target SA," they just differ
+ * in HOW that token gets minted and how long-lived the underlying secret is.
+ *
+ * <h2>System design takeaway</h2>
+ * The three auth methods form a spectrum of blast radius, not just
+ * convenience: a leaked JSON key is a standing credential valid until
+ * manually revoked (worst blast radius, best portability); impersonation
+ * tokens expire in ~1 hour and require the impersonator to already hold a
+ * TokenCreator grant, so a leak is bounded by both time and a pre-existing
+ * trust relationship; attached identity has no exportable secret at all -
+ * the token only ever exists in the metadata server's response and a
+ * process's memory, which is why it's the only one of the three considered
+ * safe for production without extra controls. Designing a system's identity
+ * story is really designing where on this spectrum each component sits:
+ * production workloads on GCP compute should always land on attached
+ * identity; local dev/CI that isn't itself GCP infra should land on
+ * impersonation; JSON keys should be the last resort, for the rare
+ * external/non-GCP caller that has no other option, with rotation and
+ * expiry policy planned in from day one.
  */
 package com.ashfaq.gcplab._02_identities_bindings;

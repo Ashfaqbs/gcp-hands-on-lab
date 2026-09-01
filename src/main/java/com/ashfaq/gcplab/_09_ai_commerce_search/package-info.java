@@ -223,5 +223,50 @@
  * returned {@code {}} - no products field at all. The {@code
  * default_catalog} resource itself and the {@code default_search} serving
  * config remain (no cost while empty) - only the product data was purged.
+ *
+ * <h2>Internal architecture: catalog ingest vs. search serving are separate systems</h2>
+ * <pre>
+ * CatalogImportDemo -&gt; ImportProductsRequest (inline, batched 100/call)
+ *   -&gt; retail.googleapis.com write path -&gt; product data lands in
+ *      catalog/branch storage AND is asynchronously fed into a SEPARATE
+ *      search-indexing pipeline (this is why import completion and
+ *      "searchable" are not the same instant - there's a real, if usually
+ *      short, propagation delay between a product landing in the catalog
+ *      store and appearing in search results, which is why real
+ *      integrations poll/verify rather than assume immediate searchability)
+ * SearchQualityTest -&gt; SearchRequest against a SERVING CONFIG (default_search)
+ *   -&gt; the serving config is a pointer to (catalog, branch, ranking/facet
+ *      rules) - NOT a live query over the raw catalog store; it queries
+ *      Google's managed search index built from that data
+ *   -&gt; candidate retrieval (token/keyword match against the index, per this
+ *       module's findings, NOT semantic/embedding-based by default) -&gt;
+ *      ranking (relevance score, optionally boosted by business rules,
+ *      pricing, popularity signals - none configured here) -&gt; top-N product
+ *      IDs returned -&gt; caller does a separate GetProduct call per ID to
+ *      fetch full details (search returns IDs/summary fields, not the full
+ *      catalog record, by design - keeps the hot search path lean)
+ * </pre>
+ * BRANCHES exist specifically to make a catalog refresh atomic at serving-
+ * config scale: import a whole new catalog into an inactive branch, verify
+ * it, then flip the serving config's active branch in one call - shoppers
+ * never see a half-updated catalog mid-import, unlike this module's
+ * approach of importing directly into the live branch "0" (fine for a
+ * learning exercise with zero real traffic, not how a production catalog
+ * refresh should work).
+ *
+ * <h2>System design takeaway</h2>
+ * The 100-query audit's real lesson is architectural, not just a scoring
+ * table: a managed "AI search" product's default candidate-retrieval stage
+ * is still fundamentally a text-matching index unless you explicitly turn
+ * on its semantic/embedding retrieval features - "AI-branded" does not mean
+ * "vector search is the default retrieval mechanism." Designing search for
+ * a real catalog means treating retrieval and ranking as two SEPARATE
+ * tunable stages: candidate retrieval (does the query even surface the
+ * right product at all - this module's B-bucket failures are entirely
+ * retrieval failures, zero candidates returned) has to work before ranking
+ * (is the RIGHT candidate first among several) can matter at all - and a
+ * managed product's off-the-shelf configuration should never be assumed to
+ * have solved the harder, first problem without verifying it the way this
+ * module did.
  */
 package com.ashfaq.gcplab._09_ai_commerce_search;
