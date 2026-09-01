@@ -371,5 +371,152 @@
  * model guessing a believable-looking number. The same loop, with a real
  * tool instead of {@code multiply}, is the entire mechanism behind every
  * "agent" use case listed above.
+ *
+ * <h2>Quick reference: things real work needs that this module's demos didn't hit</h2>
+ * Everything below is real, current (2026-08) API surface - the intent is
+ * that picking a model, sending an image, forcing JSON output, or reading a
+ * quota error should never require a Google search starting from scratch.
+ *
+ * <p><b>1. Model catalog - which model to actually pick.</b> Model Garden
+ * exposes many models; for Gemini specifically, the naming pattern is
+ * {@code gemini-<version>-<tier>}:
+ * <ul>
+ *   <li>{@code -flash} (used throughout this module, e.g.
+ *       {@code gemini-2.5-flash}) - fastest, cheapest, the right default for
+ *       most application code, chat, RAG, agent tool-calling.</li>
+ *   <li>{@code -pro} - meaningfully stronger reasoning/coding/long-context
+ *       handling, several times the cost per token - reach for it when
+ *       flash's answers are visibly worse on your specific task, not by
+ *       default.</li>
+ *   <li>{@code -flash-lite} - cheaper/faster than flash again, for high-
+ *       volume simple tasks (classification, short extraction) where
+ *       latency/cost matters more than nuance.</li>
+ * </ul>
+ * Gemini 3's models add a {@code thinkingConfig.thinkingLevel} request field
+ * (low/medium/high) - an explicit dial on how much internal "reasoning"
+ * budget the model spends before answering; higher levels cost more tokens
+ * and latency for better answers on genuinely hard problems, and are wasted
+ * spend on simple lookups/extractions. Always check
+ * {@code cloud.google.com/vertex-ai/generative-ai/docs/models} for the
+ * current model list and each one's context-window size and knowledge
+ * cutoff before picking one for a new project - this list changes often
+ * (this repo already hit one full rebrand, see the "Vertex AI ->
+ * Agent Platform" note above).
+ *
+ * <p><b>2. Sending images/audio/video/PDFs (multimodal input) - not used in
+ * this module's text-only demos, but the SAME generateContent call:</b>
+ * <pre>
+ * // Small file: inline bytes, base64-encoded under the hood by the SDK
+ * Content content = Content.fromParts(
+ *     Part.fromText("What's in this image?"),
+ *     Part.fromBytes(Files.readAllBytes(Path.of("photo.jpg")), "image/jpeg"));
+ *
+ * // Large file (video, big PDF): reference a GCS URI instead of inlining bytes -
+ * // required past ~20MB, and avoids resending the same bytes on every call
+ * Content content2 = Content.fromParts(
+ *     Part.fromText("Summarize this document."),
+ *     Part.fromUri("gs://my-bucket/report.pdf", "application/pdf"));
+ *
+ * client.models.generateContent("gemini-2.5-flash", content, null);
+ * </pre>
+ * One call handles text, images, audio, video, and PDFs together in the
+ * same {@code contents} array - there is no separate "vision API" the way
+ * older-generation multimodal products required.
+ *
+ * <p><b>3. Forcing structured JSON output (the single most useful feature
+ * for backend integration, not exercised by any demo here):</b>
+ * <pre>
+ * GenerateContentConfig config = GenerateContentConfig.builder()
+ *     .responseMimeType("application/json")
+ *     .responseSchema(Schema.builder()
+ *         .type("OBJECT")
+ *         .properties(Map.of(
+ *             "productName", Schema.builder().type("STRING").build(),
+ *             "sizeInMl", Schema.builder().type("INTEGER").build(),
+ *             "inStock", Schema.builder().type("BOOLEAN").build()))
+ *         .required(List.of("productName"))
+ *         .build())
+ *     .build();
+ * String json = client.models.generateContent("gemini-2.5-flash", prompt, config).text();
+ * // json is guaranteed to parse against the schema - no more brittle
+ * // "please respond in JSON" prompt-engineering and hoping
+ * </pre>
+ * This is the mechanism behind {@code FunctionDeclaration.parameters} in
+ * {@code SimpleAgentDemo} too - same Schema type, same underlying
+ * constrained-decoding feature, just applied to the final answer instead
+ * of to a tool call's arguments.
+ *
+ * <p><b>4. Streaming vs. non-streaming - when to use which.</b>
+ * {@code generateContent} (used throughout this module) blocks until the
+ * full response is ready - fine for backend-to-backend calls (an agent
+ * tool call, a batch job) where nothing is rendered live.
+ * {@code generateContentStream} returns an iterable of partial chunks as
+ * they're generated - use it for anything with a human watching a UI, so
+ * text appears progressively instead of after a multi-second silent wait;
+ * total tokens billed are identical either way, streaming only changes
+ * WHEN you receive them, not the cost.
+ *
+ * <p><b>5. Token limits and counting.</b> Every model has a fixed context
+ * window (input + output tokens combined) - Gemini 2.5/3 flash models are
+ * generally in the 1M-token range, but ALWAYS verify current numbers per
+ * model on the Model Garden page, this changes across model versions. Count
+ * tokens BEFORE sending a large prompt (e.g. a big RAG context) via
+ * {@code client.models.countTokens(model, contents)} - cheaper and faster
+ * than finding out a call fails with a context-length error after
+ * assembling a huge prompt. Going over the limit fails the request outright
+ * (truncation is never silent) with an INVALID_ARGUMENT-class error.
+ *
+ * <p><b>6. Embeddings model detail (used by {@code SimpleRagDemo} but not
+ * fully explained there):</b> {@code text-embedding-005} (the model used in
+ * this module) takes a {@code taskType} parameter that meaningfully changes
+ * the resulting vector - {@code RETRIEVAL_DOCUMENT} for text being INDEXED,
+ * {@code RETRIEVAL_QUERY} for the search query text, {@code SEMANTIC_SIMILARITY}
+ * for general similarity comparison, {@code CLASSIFICATION}/{@code CLUSTERING}
+ * for those specific downstream tasks. Using the wrong task type for
+ * indexing vs. querying (e.g. RETRIEVAL_QUERY for both, which SimpleRagDemo
+ * does for simplicity at this toy scale) measurably hurts retrieval quality
+ * at real scale - worth fixing when this pattern graduates beyond a 4-fact
+ * demo. Output is a 768-dimension float vector by default (some embedding
+ * models support requesting smaller dimensions, trading a little accuracy
+ * for storage/compute savings on the vector index side).
+ *
+ * <p><b>7. Grounding with Google Search - a built-in tool, no RAG needed for
+ * current-events questions:</b> declaring {@code Tool.builder().googleSearch(...)}
+ * (seen in the raw REST shape in the section above, {@code tools:
+ * [{googleSearch: {}}]}) lets the model decide to run a real web search and
+ * cite sources before answering - useful for "what happened today" style
+ * questions no amount of RAG over static documents can answer, billed
+ * separately per grounded request on top of normal token cost (check
+ * current grounding pricing before relying on it for anything high-volume).
+ *
+ * <p><b>8. Common errors and what they actually mean:</b>
+ * <ul>
+ *   <li>{@code RESOURCE_EXHAUSTED} / HTTP 429 - hit a quota (requests per
+ *       minute per model per region, or tokens per minute) - back off and
+ *       retry with exponential backoff (the SDK does not auto-retry this by
+ *       default); if it's a recurring production pattern, request a quota
+ *       increase via Console -&gt; IAM &amp; Admin -&gt; Quotas rather than
+ *       just retrying forever.</li>
+ *   <li>{@code PERMISSION_DENIED} - almost always either the caller's
+ *       identity lacks {@code aiplatform.endpoints.predict} (or the broader
+ *       {@code roles/aiplatform.user}), or {@code aiplatform.googleapis.com}
+ *       isn't enabled on the project - check both before assuming a code
+ *       bug.</li>
+ *   <li>{@code NOT_FOUND} on a model name - either a typo, or the model
+ *       genuinely isn't available in the {@code location} the client was
+ *       built with (not every model ships in every region - us-central1
+ *       has the broadest availability and is the safe default).</li>
+ *   <li>A response with {@code finishReason: SAFETY} and empty/truncated
+ *       text - the model's own safety filters blocked the output; adjust
+ *       {@code safetySettings} (per-category thresholds: harassment, hate
+ *       speech, sexually explicit, dangerous content - each settable from
+ *       BLOCK_NONE to BLOCK_LOW_AND_ABOVE) if the block is a false positive
+ *       for a legitimate use case, never silently retry expecting a
+ *       different result.</li>
+ *   <li>{@code finishReason: MAX_TOKENS} with a response that just stops
+ *       mid-sentence - {@code generationConfig.maxOutputTokens} was hit;
+ *       raise it (bounded by the model's context window) rather than
+ *       treating the cutoff response as complete.</li>
+ * </ul>
  */
 package com.ashfaq.gcplab._08_vertexai;

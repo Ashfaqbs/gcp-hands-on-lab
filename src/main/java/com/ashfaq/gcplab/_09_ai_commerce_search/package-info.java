@@ -410,5 +410,126 @@
  * Exists purely so a reader can open one file and judge the synthetic
  * catalog's realism directly, rather than inferring data quality indirectly
  * from which search queries did or didn't return results.
+ *
+ * <h2>Quick reference: things real work needs that this module's demos didn't hit</h2>
+ * The demos here proved plain free-text search works end to end; a real
+ * storefront integration needs the pieces below too - all real, current
+ * SearchRequest/Product fields, so wiring facets, filters, or
+ * recommendations shouldn't require starting from a Google search.
+ *
+ * <p><b>1. Filtering - structured, not free-text.</b> "Show me only
+ * PureHarvest products under 200 rupees" is a {@code filter} STRING on
+ * SearchRequest, a small structured-query language, NOT part of the
+ * {@code query} text field used by this module's demos:
+ * <pre>
+ * SearchRequest.newBuilder()
+ *     .setQuery("rice")
+ *     .setFilter("brand: ANY(\"PureHarvest\") AND priceInfo.price &lt; 200")
+ *     ...
+ * </pre>
+ * Filters can reference any indexed attribute (brand, categories,
+ * priceInfo.price, or a custom attribute like this catalog's
+ * {@code attributes.size}/{@code attributes.weight}) - combined with
+ * {@code AND}/{@code OR}/{@code NOT}. A custom attribute must be marked
+ * {@code indexable: true} on the Product (done implicitly by the SDK for
+ * simple key/value attributes, as this module's catalog import relies on)
+ * before it can be filtered or faceted on - an attribute imported without
+ * indexing enabled will silently not show up in filter/facet results, a
+ * common real-world gotcha.
+ *
+ * <p><b>2. Facets - the "Brand / Price / Size" sidebar every product search
+ * page has.</b> Requested via {@code facetSpecs} on the SearchRequest, NOT
+ * automatic - without it, a SearchResponse has no facet/count breakdown at
+ * all:
+ * <pre>
+ * SearchRequest.newBuilder()
+ *     .setQuery("shampoo")
+ *     .addFacetSpecs(FacetSpec.newBuilder()
+ *         .setFacetKey(FacetKey.newBuilder().setKey("brand").build())
+ *         .setLimit(20))
+ *     .addFacetSpecs(FacetSpec.newBuilder()
+ *         .setFacetKey(FacetKey.newBuilder().setKey("priceInfo.price")
+ *             .addIntervals(Interval.newBuilder()
+ *                 .setMaximum(100.0)).build()))       // price bucket: 0-100
+ *     ...
+ * </pre>
+ * The response then includes, per requested facet, each distinct value
+ * (e.g. every brand present in the current result set) plus a COUNT - the
+ * numbers next to each checkbox in a typical filter sidebar.
+ *
+ * <p><b>3. Business rules (boost/bury) - merchandising control, opt-in.</b>
+ * A {@code Control} resource (created via {@code ControlServiceClient},
+ * separate from ServingConfig) can boost or bury specific products/brands
+ * for matching queries without touching the catalog data itself - e.g.
+ * "boost brand=DailyFresh by 0.3 for any dairy-category query" to promote a
+ * paid placement, or "bury out-of-stock items to -1.0" - attached to a
+ * serving config so it applies at query time. This module's
+ * {@code default_search} config left every business rule unconfigured
+ * deliberately, to measure the unmodified baseline (see the 100-query
+ * audit) - a real storefront layers these on top once organic relevance is
+ * already trustworthy.
+ *
+ * <p><b>4. UserEvents - what actually unlocks Recommendations.</b> The
+ * Recommendations capability (noted, not exercised in this module) trains
+ * entirely on a UserEvent stream - it does not just look at the Product
+ * catalog:
+ * <pre>
+ * UserEvent event = UserEvent.newBuilder()
+ *     .setEventType("purchase-complete")   // also: "add-to-cart", "detail-page-view",
+ *                                           // "search", "home-page-view", etc.
+ *     .setVisitorId("visitor-123")
+ *     .setEventTime(Timestamp.newBuilder().setSeconds(Instant.now().getEpochSecond()))
+ *     .addProductDetails(ProductDetail.newBuilder()
+ *         .setProduct(ProductDetail.ProductInfo.newBuilder().setId("p204")))
+ *     .build();
+ * userEventClient.writeUserEvent(WriteUserEventRequest.newBuilder()
+ *     .setParent("projects/PROJECT/locations/global/catalogs/default_catalog")
+ *     .setUserEvent(event).build());
+ * </pre>
+ * A production integration streams these continuously (every search, every
+ * product view, every add-to-cart, every purchase) - Recommendations
+ * quality is directly a function of event VOLUME and coverage of event
+ * types, which is exactly why this module (zero real shoppers, zero real
+ * events) explicitly left Recommendations untested rather than fabricate a
+ * misleading result; docs/roadmap.md notes synthesizing fake events as a
+ * legitimate follow-up specifically to unlock this honestly.
+ *
+ * <p><b>5. Autocomplete - a separate, opt-in call.</b>
+ * {@code CompletionServiceClient.completeQuery(...)} - given a partial
+ * string ("choc"), returns ranked query completions ("chocolate milk",
+ * "chocolate biscuits") trained on the catalog and search-log data, the
+ * dropdown suggestions under a search box - a genuinely different API call
+ * from Search itself, not a parameter on SearchRequest.
+ *
+ * <p><b>6. Common errors and what they actually mean:</b>
+ * <ul>
+ *   <li>{@code NOT_FOUND} on the catalog/branch/servingConfig path - almost
+ *       always a typo in the resource name string (this API's resource
+ *       paths are long and hand-assembled, e.g. {@code projects/P/locations/
+ *       global/catalogs/default_catalog/branches/0/...} - a wrong segment
+ *       fails silently as NOT_FOUND, not a clearer "bad path" error).</li>
+ *   <li>{@code INVALID_ARGUMENT} on import - almost always a malformed
+ *       Product (missing required {@code id}/{@code title}, or a custom
+ *       attribute value of the wrong type) - the error message includes
+ *       which product/field, worth reading carefully rather than assuming
+ *       a bulk failure means every product is bad.</li>
+ *   <li>Search returns zero results for a query where the word visibly
+ *       appears in a product's title/description - THIS module's central
+ *       finding (see the 100-query audit) - not a bug, it's the default
+ *       index behaving like a phrase/structured matcher rather than a
+ *       free-text token matcher; the fix is enabling the product's
+ *       search-quality/semantic-retrieval configuration, not a code
+ *       change.</li>
+ *   <li>{@code RESOURCE_EXHAUSTED} - hit one of the per-minute quotas (see
+ *       the Scale limits table above, e.g. 300 searches/minute default) -
+ *       request a quota increase via Console -&gt; IAM &amp; Admin -&gt;
+ *       Quotas for anything genuinely busier, same pattern as
+ *       {@code _08_vertexai}'s quota-error guidance.</li>
+ *   <li>A product imported successfully (visible via GetProduct) but never
+ *       appears in search results - almost always the indexing-propagation
+ *       delay noted in "Internal architecture" above (import and
+ *       searchability are two separate pipelines) - wait and re-check
+ *       before assuming the import silently failed.</li>
+ * </ul>
  */
 package com.ashfaq.gcplab._09_ai_commerce_search;
