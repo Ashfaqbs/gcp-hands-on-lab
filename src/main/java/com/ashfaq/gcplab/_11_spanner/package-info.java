@@ -1,6 +1,122 @@
 /**
  * Reading order: 11 (comes after _01_iam ... _10_elasticsearch).
  *
+ * <h2>Plain-English primer (read this first if Spanner is brand new to you)</h2>
+ * <p><b>What category is it?</b> Spanner is a RELATIONAL database - SQL,
+ * schema, tables, joins, ACID transactions - so mentally it sits closer to
+ * Postgres than to MongoDB. But its ENGINEERING is closer to how MongoDB/
+ * Cassandra scale (auto-sharding across machines). Google's own label for
+ * it: "the only database that's both horizontally scalable AND strongly
+ * consistent" - a combination the CAP theorem says should be impossible.
+ * Spanner gets away with it using TrueTime, a globally-synchronized atomic-
+ * clock system across every Google datacenter, instead of the usual
+ * consistency-vs-availability trade-off (see Internal architecture below
+ * for how that actually works under the hood). Short version: Postgres's
+ * data model + MongoDB's horizontal-scaling instinct + transactions that
+ * never break, even across continents.
+ *
+ * <p><b>The hierarchy - mapped to what an RDBMS/Mongo background already
+ * knows:</b>
+ * <pre>
+ * Instance                  - NOT really a database concept at all. It's a
+ *                              slab of reserved compute capacity (nodes, or
+ *                              fractional "processing units") you buy up
+ *                              front - like reserving "this much CPU/RAM
+ *                              budget" before a database even exists yet.
+ *   -&gt; Database              - ONE logical database, ONE schema, shared
+ *                              across the whole instance's capacity. An
+ *                              instance can host multiple databases.
+ *     -&gt; Table               - real SQL DDL: CREATE TABLE employees (...)
+ *                              PRIMARY KEY (...) - schema-WIDE, defined
+ *                              once, not per-node.
+ *       -&gt; Row                - a normal row, same as any RDBMS.
+ * </pre>
+ * <b>The one genuinely new idea, and the most common misconception:</b> it
+ * is tempting to picture this like a sharded MongoDB cluster - "each node
+ * is basically its own mini-database, holding its own slice of the
+ * schema." Spanner is NOT that. There is one schema, one database, full
+ * stop. What Spanner actually does is slice each TABLE's ROWS into chunks
+ * called <b>splits</b> (by primary-key range) and scatter those chunks
+ * across the instance's nodes automatically and invisibly, rebalancing as
+ * data grows - you never choose which node holds which data, and a node
+ * never "owns" a table or a schema, it just holds a shifting subset of ROWS
+ * from potentially every table. A <b>interleaved table</b> (the second new
+ * concept, no RDBMS equivalent) is a schema hint - stronger than a foreign
+ * key - that says "always physically co-locate this child row on the SAME
+ * split as its parent row," so a parent-&gt;child join never has to cross
+ * nodes; a plain foreign key still joins correctly without this, it just
+ * may touch more nodes to do it. If you've used Postgres with the Citus
+ * extension, or heard of CockroachDB, that's the closest familiar analogy -
+ * both were explicitly inspired by Google's public Spanner research paper:
+ * one SQL schema, rows auto-sharded across a cluster of machines under the
+ * hood, joins still work correctly across shards, just potentially slower
+ * when the joined rows aren't co-located.
+ *
+ * <p><b>Full join capability, yes - with a performance nuance.</b> Because
+ * it's genuinely relational (unlike Firestore/Mongo), every SQL join works,
+ * including across tables whose rows landed on different nodes - Spanner
+ * runs a real distributed join and merges results transparently, exactly
+ * as if it were one machine. The join is always CORRECT; interleaving
+ * (above) is purely a lever for making PARENT-CHILD joins specifically
+ * faster by guaranteeing co-location, not a requirement for joins to work
+ * at all.
+ *
+ * <p><b>Why this exists / when to actually reach for it:</b>
+ * <ul>
+ *   <li>Cloud SQL (Postgres, {@code _04_cloudsql}) = one managed VM (or
+ *       VM + replica) - the right, cheaper default until write volume
+ *       outgrows one machine, at which point there is no horizontal path
+ *       forward at all, ever.</li>
+ *   <li>Firestore/MongoDB = scales horizontally with ease, but gives up
+ *       joins and strict relational structure to get there.</li>
+ *   <li>Spanner = keeps SQL/joins/transactions AND scales horizontally,
+ *       paid for with real dollars (no free tier, billed even sitting
+ *       fully idle) and a bit more schema-design thought up front (splits,
+ *       interleaving).</li>
+ * </ul>
+ * Real-world fits: global ledgers/banking, e-commerce order/inventory
+ * systems that outgrew one DB server, multiplayer game state, ad-serving
+ * systems - Google's own Ads and Google Play backends run on Spanner for
+ * exactly this reason. For roughly 95% of applications - including every
+ * other module in this repo - Cloud SQL remains the right, cheaper answer;
+ * Spanner is a deliberate reach for a specific scale problem, never a
+ * default choice.
+ *
+ * <p><b>Doing it entirely via Console UI (no code, mirrors _04_cloudsql's
+ * Cloud SQL Studio pattern):</b>
+ * <ol>
+ *   <li>Console search bar -&gt; type "Spanner" -&gt; the Spanner product
+ *       page.</li>
+ *   <li><b>Create Instance</b>: name it (e.g. {@code learning-spanner}).
+ *       Configuration: Regional (cheaper, one region) vs. Multi-region
+ *       (pricier, survives a whole region going down) - pick Regional,
+ *       {@code us-central1}. Compute capacity is the important cost knob -
+ *       Console DEFAULTS to "1 node"; instead choose <b>Processing
+ *       units</b> and set it to <b>100</b> (the smallest allowed unit,
+ *       1/10th of a node) - this single field is the biggest lever on the
+ *       bill. Click Create.</li>
+ *   <li><b>Create a database</b> (inside the instance page -&gt;
+ *       "Databases" tab -&gt; Create Database): name it (e.g.
+ *       {@code learning-db}). The wizard lets you paste {@code CREATE
+ *       TABLE} DDL right there, or create it empty and add schema
+ *       afterward.</li>
+ *   <li><b>Spanner Studio</b> (left nav, inside the database) - a built-in
+ *       SQL editor, the same experience as {@code _04_cloudsql}'s Cloud SQL
+ *       Studio: run {@code CREATE TABLE}, {@code INSERT}, {@code SELECT},
+ *       {@code UPDATE} directly in the browser, no client library or local
+ *       tool needed.</li>
+ *   <li><b>When done - delete the INSTANCE, not just the database.</b>
+ *       Deleting the instance kills every database inside it and stops
+ *       billing immediately - this is the step that actually protects the
+ *       wallet, because an empty database costs exactly the same as a full
+ *       one (see below).</li>
+ * </ol>
+ * <p><b>The one fact worth internalizing above everything else:</b> Spanner
+ * bills for the CAPACITY reserved, not for what was actually done with it -
+ * same as Cloud SQL and Memorystore Redis, unlike Firestore/GCS which bill
+ * by real usage. An idle, empty Spanner instance costs exactly the same,
+ * every hour, as one being hammered with traffic.
+ *
  * <h2>Cloud Spanner = globally-consistent, horizontally-scalable RDBMS</h2>
  * The module this one is meant to be read against is {@code _04_cloudsql}:
  * both speak SQL, both have tables/rows/transactions, both feel like a
