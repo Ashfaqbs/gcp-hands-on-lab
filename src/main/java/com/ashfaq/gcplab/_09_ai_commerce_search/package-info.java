@@ -268,5 +268,147 @@
  * managed product's off-the-shelf configuration should never be assumed to
  * have solved the harder, first problem without verifying it the way this
  * module did.
+ *
+ * <h2>What this service actually is, in plain terms</h2>
+ * AI Commerce Search is a fully packaged, ready-to-call retail search/
+ * browse/recommendation engine - you give Google a product catalog (the
+ * same shape a real e-commerce backend already has: id, title, description,
+ * category, brand, price, custom attributes) and Google gives you back a
+ * search API that already understands product-shaped data out of the box:
+ * facets/filters, price ranges, category browsing, and Google's own ranking
+ * signals - none of which you build yourself, unlike {@code _10_elasticsearch}
+ * where every one of those is something you'd configure by hand. It is
+ * explicitly NOT a general-purpose search engine (you can't point it at
+ * arbitrary documents/web pages the way you could Elasticsearch) - the API
+ * schema is retail-specific (Product, UserEvent, SearchRequest all have
+ * retail-domain fields baked in), which is the trade this product makes:
+ * narrower scope, in exchange for far less setup for the one domain it
+ * targets.
+ *
+ * <h2>Why this exists - the problem it solves</h2>
+ * Every online retailer needs product search, and building a genuinely good
+ * one from scratch is a much harder, longer project than it looks: handling
+ * typos and synonyms, understanding "cheap running shoes under $50" as a
+ * structured filter plus a text query, ranking results by what actually
+ * converts (not just text relevance), and personalizing results per shopper
+ * - all of that is a dedicated search-relevance engineering discipline most
+ * retail companies don't want to (or can't afford to) build and maintain in
+ * house. This product's pitch is "Google already solved large-scale product
+ * search for its own Shopping product - rent that expertise via API" rather
+ * than every retailer separately reinventing ranking/relevance tuning. It
+ * also directly targets the semantic-gap problem this module's own audit
+ * quantified: a shopper who types "something for my dandruff" instead of
+ * the literal product name "anti-dandruff shampoo" - solving that gap well
+ * is specifically what the product's (opt-in, not exercised in this default-
+ * config module) semantic/embedding retrieval and query-understanding
+ * features are built for.
+ *
+ * <h2>Real-world use cases - what this is actually built for</h2>
+ * <ul>
+ *   <li><b>The site search box</b> - the core use case: a shopper types a
+ *       query, gets back ranked, relevant products with facets to narrow
+ *       further (brand, price range, size, rating) - this module's
+ *       {@link SearchQualityTest} exercises exactly this endpoint, just
+ *       without a UI wired to it.</li>
+ *   <li><b>Category/collection browse pages</b> - "Browse" (bundled with
+ *       Search, same underlying ranking engine) powers pages like
+ *       "/category/dairy" - not a text query at all, but the same catalog
+ *       and ranking signals apply (best-sellers first, in-stock first,
+ *       etc.), letting one system back both the search box and every
+ *       category page instead of two separate implementations.</li>
+ *   <li><b>"Customers also bought" / "similar items" widgets</b> - the
+ *       Recommendations capability (noted but not exercised here since it
+ *       needs real user event history to train on) - this is what actually
+ *       requires the UserEvent stream (views, add-to-cart, purchases) this
+ *       module never generated; a follow-up exercise noted in
+ *       docs/roadmap.md would synthesize fake events specifically to
+ *       unlock and test this.</li>
+ *   <li><b>Autocomplete / query suggestions</b> - a related, opt-in feature
+ *       of the same product (not called in this module) that suggests
+ *       completions as a shopper types, trained on the same catalog and
+ *       search-log signals.</li>
+ *   <li><b>Merchandising / business-rule overrides</b> - boosting or
+ *       pinning specific products for a query (e.g. promoting a
+ *       overstocked item, or a sponsored placement) via business rules
+ *       layered on top of organic ranking - configuration this module's
+ *       {@code default_search} serving config left entirely at its
+ *       out-of-the-box defaults, deliberately, to measure the unconfigured
+ *       baseline first.</li>
+ *   <li><b>Feeding a conversational shopping assistant</b> - exactly
+ *       docs/roadmap.md's Track A ("Rufus clone"): an LLM agent
+ *       ({@code _08_vertexai}'s agent-loop pattern) calling THIS service's
+ *       search endpoint as a tool, so the assistant's product knowledge is
+ *       always the real, current catalog rather than the model's own
+ *       (possibly stale, possibly hallucinated) training knowledge.</li>
+ * </ul>
+ *
+ * <h2>Sample usage walkthrough - each demo class, what it proves</h2>
+ * <b>{@link ProductCatalogGenerator} + {@link CatalogImportDemo} - getting
+ * real product data in:</b>
+ * <pre>
+ * List&lt;Product&gt; products = ProductCatalogGenerator.generate();  // 703 synthetic products
+ * ProductServiceSettings settings = ProductServiceSettings.newBuilder()
+ *     .setCredentialsProvider(FixedCredentialsProvider.create(impersonatedCredentials))
+ *     .build();
+ * try (ProductServiceClient client = ProductServiceClient.create(settings)) {
+ *     for (List&lt;Product&gt; batch : Lists.partition(products, 100)) {   // 100/call cap
+ *         ImportProductsRequest req = ImportProductsRequest.newBuilder()
+ *             .setParent("projects/PROJECT/locations/global/catalogs/default_catalog/branches/0")
+ *             .setInputConfig(ProductInputConfig.newBuilder()
+ *                 .setProductInlineSource(ProductInlineSource.newBuilder()
+ *                     .addAllProducts(batch)).build())
+ *             .build();
+ *         // real code polls the raw Operation (see the SDK-bug workaround
+ *         // in "Catalog import" above) rather than .get() on the typed future
+ *         Operation op = client.importProductsCallable().call(req).getOperation();
+ *         while (!op.getDone()) { Thread.sleep(2000); op = opsClient.getOperation(op.getName()); }
+ *     }
+ * }
+ * </pre>
+ * 8 batches for 703 products, each product carrying a title, description,
+ * category path, brand, price, and (for apparel/diapers) a custom
+ * {@code size}/{@code weight} attribute - the exact same shape a real
+ * e-commerce product catalog already has, which is the point: nothing
+ * search-specific to model, you import what you already have.
+ * <p>
+ * <b>{@link SearchQualityTest} - the actual search call, and why the audit
+ * exists:</b>
+ * <pre>
+ * SearchServiceSettings settings = SearchServiceSettings.newBuilder()
+ *     .setCredentialsProvider(FixedCredentialsProvider.create(impersonatedCredentials))
+ *     .build();
+ * try (SearchServiceClient client = SearchServiceClient.create(settings)) {
+ *     SearchRequest req = SearchRequest.newBuilder()
+ *         .setPlacement("projects/PROJECT/locations/global/catalogs/default_catalog"
+ *             + "/servingConfigs/default_search")
+ *         .setQuery("i need something for my dandruff")
+ *         .setVisitorId("test-visitor-1")             // required - anonymizes/tracks the "session"
+ *         .setPageSize(3)
+ *         .build();
+ *     for (SearchResult r : client.search(req).iterateAll()) {
+ *         GetProductRequest getReq = GetProductRequest.newBuilder().setName(r.getProduct().getName()).build();
+ *         Product full = productClient.getProduct(getReq);   // search returns IDs; a 2nd call gets full detail
+ *         System.out.println(full.getTitle());
+ *     }
+ *     // for this exact query: ZERO results, even though "Anti-Dandruff Shampoo"
+ *     // exists verbatim in the catalog - this is the finding the audit scored
+ * }
+ * </pre>
+ * The two-call shape (search for IDs, then GetProduct per ID for full
+ * detail) is deliberate on Google's part, not a limitation worked around
+ * here - it keeps the high-QPS search path returning minimal payloads,
+ * pushing the cost of full product detail only onto the results a shopper
+ * actually needs rendered (typically the top handful, not every candidate
+ * considered internally during ranking).
+ * <p>
+ * <b>{@link CatalogExportDemo} - inspecting the ground truth directly:</b>
+ * <pre>
+ * List&lt;Product&gt; products = ProductCatalogGenerator.generate();  // same generator, zero API calls
+ * // ... writes id/title/description/category/brand/price/attribute per
+ * // product as plain JSON to search-experiments/catalog-export.json
+ * </pre>
+ * Exists purely so a reader can open one file and judge the synthetic
+ * catalog's realism directly, rather than inferring data quality indirectly
+ * from which search queries did or didn't return results.
  */
 package com.ashfaq.gcplab._09_ai_commerce_search;

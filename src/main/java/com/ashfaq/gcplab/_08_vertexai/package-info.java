@@ -215,5 +215,161 @@
  * stateful feature like Live API sessions - by default, YOU resend the
  * whole conversation, and that resent history is billed as input tokens
  * every single time).
+ *
+ * <h2>What this service actually is, in plain terms</h2>
+ * Agent Platform (formerly Vertex AI) is Google's single umbrella product
+ * for everything "AI" on GCP: a catalog of pre-trained foundation models you
+ * can call over an API with zero infrastructure of your own (Model Garden -
+ * Gemini, plus third-party/open models like Llama and Claude, all served
+ * behind the same interface), tooling to fine-tune or fully custom-train
+ * your own models on your own data, a place to deploy any trained model
+ * behind a scalable prediction endpoint, and - the newest layer, the one
+ * this module actually exercises - a framework for building AGENTS: programs
+ * that don't just answer one prompt but can decide to call tools, retrieve
+ * information, and take multi-step actions toward a goal. Concretely, what
+ * you get by calling this API is a fully-hosted large language model you
+ * send text (or images/audio/video - Gemini is natively multimodal, not
+ * used in this module but available on the same endpoint) and get text (or
+ * structured JSON, or a tool-call request) back, with Google running and
+ * scaling the actual model weights, GPUs/TPUs, and serving infrastructure -
+ * you never touch any of that, the same way _03_storage never requires you
+ * to think about disks.
+ *
+ * <h2>Why this exists - the problem it solves</h2>
+ * Before managed LLM APIs, using a model this capable meant either running
+ * a huge model yourself (needing serious GPU/TPU infrastructure, model
+ * ops expertise, and constant retraining/updating as better models ship) or
+ * not having access to one at all. Agent Platform's value proposition is
+ * "rent the intelligence, keep the data/logic": Google owns and continually
+ * upgrades the model (a code change on Google's side, e.g. gemini-2.5 to
+ * gemini-3.7, can improve every caller's results with zero work on your
+ * part), while you own what you actually build with it - the prompts, the
+ * retrieval data (RAG), the tools an agent can call, and the business logic
+ * around when/how it's invoked. It also solves a narrower but very real
+ * problem this repo hit directly: a model's training data has a cutoff and
+ * no knowledge of YOUR private/internal data - {@code SimpleRagDemo} exists
+ * specifically to prove the fix (grounding a model in facts it was never
+ * trained on) rather than accept hallucination as inevitable.
+ *
+ * <h2>Real-world use cases - what this is actually built for</h2>
+ * <ul>
+ *   <li><b>Customer support copilots</b> - a support agent grounded via RAG
+ *       on a company's actual help docs/ticket history, so answers are
+ *       specific and current instead of generic model knowledge. This
+ *       module's {@code SimpleRagDemo} is a 4-document toy version of
+ *       exactly this pattern.</li>
+ *   <li><b>Internal "chat with your data" tools</b> - RAG over internal
+ *       wikis, contracts, codebases, or databases so employees can ask
+ *       questions in plain English instead of hunting through search UIs -
+ *       the same retrieval pattern, just pointed at a bigger, real corpus
+ *       and usually backed by a proper vector index (see docs/roadmap.md
+ *       Track C) instead of a hand-rolled cosine-similarity loop.</li>
+ *   <li><b>Autonomous or semi-autonomous agents</b> - a system that can look
+ *       up real data, call real APIs, and take real actions (book a
+ *       meeting, file a ticket, query a live database, run a calculation)
+ *       rather than just describe what it would do. {@code SimpleAgentDemo}'s
+ *       {@code multiply(a, b)} tool is a minimal stand-in for this - the
+ *       exact same mechanism scales to tools like "look up this order in
+ *       Cloud SQL," "search the product catalog" (see the Rufus-clone
+ *       capstone in docs/roadmap.md Track A, which wires this module's
+ *       agent loop to {@code _09_ai_commerce_search} as a real tool), or
+ *       "create a Jira ticket."</li>
+ *   <li><b>Content generation and summarization at scale</b> - product
+ *       descriptions, marketing copy, meeting/document summaries, code
+ *       review comments - the plain generateContent call this whole module
+ *       is built on, just with a task-specific prompt and no RAG/tools
+ *       needed.</li>
+ *   <li><b>Structured data extraction</b> - pulling specific fields (dates,
+ *       amounts, names, categories) out of unstructured text/PDFs/images
+ *       into JSON matching a schema, using Gemini's structured-output mode
+ *       (a {@code responseSchema} on the same generateContent call) - not
+ *       demonstrated in this module's demos but the identical API surface,
+ *       just with a schema constraint added to the request.</li>
+ *   <li><b>Classical ML (the "other half" of this platform, not touched by
+ *       this module's demos)</b> - fraud/anomaly detection, demand
+ *       forecasting, recommendation ranking - trained via AutoML or custom
+ *       training jobs and served via prediction endpoints; see
+ *       docs/roadmap.md Track B for this repo's planned entry point into
+ *       that side of the platform.</li>
+ * </ul>
+ *
+ * <h2>Sample usage walkthrough - each demo class, what it proves</h2>
+ * <b>{@link GeminiPromptDemo} - the floor every other capability builds on:</b>
+ * <pre>
+ * Client client = Client.builder().vertexAI(true).project(PROJECT_ID)
+ *     .location("us-central1").credentials(impersonatedCredentials).build();
+ * GenerateContentResponse resp = client.models.generateContent(
+ *     "gemini-2.5-flash",
+ *     "Explain what GCP Vertex AI is, in exactly two sentences.",
+ *     null);
+ * System.out.println(resp.text());
+ * </pre>
+ * One call, one response, no state kept between calls - this is the entire
+ * primitive. Every other demo in this module is this same call, either with
+ * a richer prompt (RAG) or with {@code tools} declared in the request
+ * (agent).
+ * <p>
+ * <b>{@link SimpleRagDemo} - grounding the model in facts it can't know:</b>
+ * <pre>
+ * // 1. Index time (once): embed each fact, keep the vector alongside the text
+ * List&lt;String&gt; facts = List.of(
+ *     "The GKE cluster in this repo ran in Autopilot mode.",
+ *     "The Cloud SQL instance used PostgreSQL 18.",
+ *     "The Redis instance was Basic tier, 1GB.",
+ *     "The Firestore database used MongoDB compatibility mode.");
+ * List&lt;float[]&gt; factEmbeddings = facts.stream()
+ *     .map(f -&gt; embed(f)).toList();   // text-embedding-005 call per fact
+ *
+ * // 2. Query time: embed the question, find the nearest fact by cosine similarity
+ * float[] queryEmbedding = embed("What mode did the GKE cluster run in?");
+ * String bestFact = facts.get(nearestByCosineSimilarity(queryEmbedding, factEmbeddings));
+ *
+ * // 3. Stuff the retrieved fact into the prompt, THEN call generateContent
+ * String prompt = "Using only this context, answer the question.\n"
+ *     + "Context: " + bestFact + "\nQuestion: What mode did the GKE cluster run in?";
+ * String answer = client.models.generateContent("gemini-2.5-flash", prompt, null).text();
+ * // answer correctly says "Autopilot" - a fact the model was never trained on
+ * </pre>
+ * The point proven: the model has zero built-in knowledge of this repo, but
+ * answers correctly once the right fact is retrieved and handed to it in
+ * the prompt - RAG in miniature, no vector database needed at this scale.
+ * <p>
+ * <b>{@link SimpleAgentDemo} - letting the model request a real computation:</b>
+ * <pre>
+ * FunctionDeclaration multiplyFn = FunctionDeclaration.builder()
+ *     .name("multiply")
+ *     .description("Multiplies two numbers and returns the exact product.")
+ *     .parameters(Schema.builder()
+ *         .type("OBJECT")
+ *         .properties(Map.of(
+ *             "a", Schema.builder().type("NUMBER").build(),
+ *             "b", Schema.builder().type("NUMBER").build()))
+ *         .build())
+ *     .build();
+ *
+ * GenerateContentResponse r1 = client.models.generateContent("gemini-2.5-flash",
+ *     "What is 48213 times 7791?",
+ *     GenerateContentConfig.builder().tools(List.of(Tool.builder()
+ *         .functionDeclarations(List.of(multiplyFn)).build())).build());
+ *
+ * // r1 contains a functionCall: multiply(a=48213, b=7791) instead of text
+ * FunctionCall call = r1.functionCalls().get(0);
+ * double result = ((Number) call.args().get("a")).doubleValue()
+ *                * ((Number) call.args().get("b")).doubleValue();   // our Java runs the real math: 375627483.0
+ *
+ * // Feed the real result back as a new turn, ask the model to finish its answer
+ * GenerateContentResponse r2 = client.models.generateContent("gemini-2.5-flash",
+ *     Content.builder().role("function").parts(List.of(Part.fromFunctionResponse(
+ *         "multiply", Map.of("result", result)))).build(),
+ *     sameToolsConfig);
+ * System.out.println(r2.text());   // "48213 times 7791 is 375,627,483."
+ * </pre>
+ * Why this matters as a pattern: an LLM is fundamentally bad at exact large-
+ * number arithmetic (it predicts plausible-looking tokens, not computes),
+ * so this demo deliberately uses a case where a wrong answer is obvious and
+ * checkable - proving the tool call genuinely ran in Java rather than the
+ * model guessing a believable-looking number. The same loop, with a real
+ * tool instead of {@code multiply}, is the entire mechanism behind every
+ * "agent" use case listed above.
  */
 package com.ashfaq.gcplab._08_vertexai;
