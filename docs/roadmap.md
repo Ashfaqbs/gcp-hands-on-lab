@@ -115,15 +115,6 @@ semantic layer and not keyword full-text.
   unlock and test this, instead of leaving it purely theoretical.
 - **BigQuery** - analytics on catalog/search-log data; natural fit once
   there's search-query logs to actually analyze.
-- **Cloud Spanner** - GCP's horizontally-scalable, globally-consistent
-  RDBMS (the tech `_06_firestore`'s internal architecture notes Firestore
-  is itself built on). Worth a hands-on module specifically to feel the
-  contrast with `_04_cloudsql`: same relational/SQL model, but scales
-  horizontally with strong consistency instead of Cloud SQL's single-VM
-  vertical-only ceiling - the trade-off being real cost (no free tier, no
-  trial-sized minimum, priced per node/processing-unit even idle) and
-  schema design that has to account for distributed write hotspots
-  (interleaved tables, primary key choice to avoid a single hot split).
 - **Cloud Run / Cloud Functions** - serverless compute, not yet touched
   (only GKE covered so far for "run my code" scenarios).
 - **Pub/Sub** - event streaming, ties into the Kafka concepts already in

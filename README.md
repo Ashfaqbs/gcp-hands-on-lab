@@ -25,6 +25,7 @@ what's metered, a formula, and where to check current pricing.
 | 08 | [`_08_vertexai`](src/main/java/com/ashfaq/gcplab/_08_vertexai) | Agent Platform (Vertex AI) | Raw prompting, hand-rolled RAG, a function-calling agent loop |
 | 09 | [`_09_ai_commerce_search`](src/main/java/com/ashfaq/gcplab/_09_ai_commerce_search) | AI Commerce Search (Retail) | 703-product synthetic catalog, 100-query relevance audit |
 | 10 | [`_10_elasticsearch`](src/main/java/com/ashfaq/gcplab/_10_elasticsearch) | Elasticsearch (self-hosted) | Same catalog, same queries, compared head-to-head against module 09 |
+| 11 | [`_11_spanner`](src/main/java/com/ashfaq/gcplab/_11_spanner) | Cloud Spanner | Globally-consistent, horizontally-scalable SQL - contrasted against module 04's single-VM Cloud SQL |
 
 ## What's next
 
