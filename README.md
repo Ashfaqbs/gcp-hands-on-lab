@@ -52,6 +52,7 @@ freely.
 | 09 | [`_09_ai_commerce_search`](src/main/java/com/ashfaq/gcplab/_09_ai_commerce_search) | AI Commerce Search (Retail) | 703-product synthetic catalog, 100-query relevance audit |
 | 10 | [`_10_elasticsearch`](src/main/java/com/ashfaq/gcplab/_10_elasticsearch) | Elasticsearch (self-hosted) | Same catalog, same queries, compared head-to-head against module 09 |
 | 11 | [`_11_spanner`](src/main/java/com/ashfaq/gcplab/_11_spanner) | Cloud Spanner | Globally-consistent, horizontally-scalable SQL - contrasted against module 04's single-VM Cloud SQL |
+| 12 | [`_12_bigquery`](src/main/java/com/ashfaq/gcplab/_12_bigquery) | BigQuery | OLAP data warehouse - columnar storage, no instance to provision, contrasted against every OLTP module (04, 06, 11) |
 
 ## What's next
 

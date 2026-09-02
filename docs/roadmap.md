@@ -113,8 +113,6 @@ semantic layer and not keyword full-text.
   `_09` since it needs real user event history) - could synthesize fake
   view/add-to-cart/purchase events against the reused catalog to actually
   unlock and test this, instead of leaving it purely theoretical.
-- **BigQuery** - analytics on catalog/search-log data; natural fit once
-  there's search-query logs to actually analyze.
 - **Cloud Run / Cloud Functions** - serverless compute, not yet touched
   (only GKE covered so far for "run my code" scenarios).
 - **Pub/Sub** - event streaming, ties into the Kafka concepts already in
