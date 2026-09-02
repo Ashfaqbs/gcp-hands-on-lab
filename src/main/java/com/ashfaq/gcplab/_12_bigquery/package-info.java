@@ -309,6 +309,122 @@
  * sink output directly into a BigQuery table (via the Storage Write API),
  * not a choice between the two for the same job.
  *
+ * <h2>Two things BigQuery calls a "job" - create, trigger, verify, both ways</h2>
+ * BigQuery genuinely overloads the word "job." This section closes that
+ * ambiguity with two demos, one per meaning, each actually run end to end
+ * rather than just described.
+ *
+ * <p><b>1. The per-operation {@link Job} - what was ALREADY running under
+ * every {@code bigquery.query(...)} call in this whole module.</b> Every
+ * DDL statement, DML statement, load, and query - {@link SchemaDemo},
+ * {@link EmployeeCrudDemo}, {@link ProductAnalyticsDemo}'s load,
+ * {@link TransformAndPersistDemo}'s CTAS - was, underneath the convenience
+ * method, a {@code Job}: created with an auto-generated ID, submitted,
+ * polled to DONE, and only then did the convenience method return.
+ * {@link JobDemo} makes every one of those steps explicit instead of
+ * hidden:
+ * <pre>
+ * // CREATE - a developer-assigned JobId, not an auto-generated one
+ * JobId jobId = JobId.newBuilder().setJob("learning-bq-job-demo-" + UUID.randomUUID()).build();
+ * Job job = bigquery.create(JobInfo.newBuilder(queryConfig).setJobId(jobId).build());
+ *
+ * // TRIGGER FROM CODE - this call already triggered it; it returns
+ * // immediately, without blocking until the job is done
+ * System.out.println(job.getStatus().getState());   // PENDING or RUNNING, not DONE yet
+ *
+ * // VERIFY - poll manually instead of the one-line waitFor() that hides this
+ * while (job.getStatus().getState() != JobStatus.State.DONE) {
+ *     Thread.sleep(500);
+ *     job = job.reload();
+ * }
+ * if (job.getStatus().getError() != null) { throw ...; }          // check for failure
+ * JobStatistics.QueryStatistics stats = job.getStatistics();       // real bytes-processed number
+ * TableResult result = job.getQueryResults();                      // fetch the actual result
+ *
+ * // Prove a Job is a real, addressable GCP resource, not a local object -
+ * // fetch the SAME job again by ID alone, independent of the handle above
+ * Job refetched = bigquery.getJob(jobId);
+ * </pre>
+ * A real run against a trivial constant query: the job's state was already
+ * {@code DONE} by the time {@code create(...)} returned (BigQuery completes
+ * genuinely small jobs synchronously in practice, even though the API is
+ * asynchronous by contract), {@code totalBytesProcessed: 0} (a literal
+ * constant, nothing scanned), and re-fetching the same job by ID
+ * independently returned the identical state - confirming Jobs are
+ * addressable resources like any other GCP resource, not local-only
+ * handles this process happened to be holding.
+ *
+ * <p><b>2. The SCHEDULED QUERY - a persistent, reusable job DEFINITION
+ * (a BigQuery Data Transfer Service {@code TransferConfig}), Console's
+ * "Scheduled queries" page's API-driven equivalent.</b> Unlike a
+ * {@code Job} (one-shot, gone once done), a scheduled query is a NAMED
+ * resource you create ONCE and can trigger MANY times - on a cron-like
+ * schedule, or on demand from code, which is what {@link
+ * ScheduledQueryDemo} does: wraps the same Apparel-with-tax CTAS transform
+ * {@link TransformAndPersistDemo} runs directly, but as a reusable
+ * definition instead of an inline statement.
+ * <pre>
+ * // CREATE the definition - disableAutoScheduling(true) means it only ever
+ * // runs when explicitly triggered, never on a cron by itself
+ * TransferConfig config = TransferConfig.newBuilder()
+ *     .setDataSourceId("scheduled_query")
+ *     .setDestinationDatasetId(DATASET_ID)
+ *     .setScheduleOptions(ScheduleOptions.newBuilder().setDisableAutoScheduling(true).build())
+ *     .setParams(Struct.newBuilder().putFields("query", Value.newBuilder().setStringValue(ctasSql).build()).build())
+ *     .build();
+ * TransferConfig created = client.createTransferConfig(CreateTransferConfigRequest.newBuilder()
+ *     .setParent(ProjectName.of(PROJECT_ID).toString()).setTransferConfig(config).build());
+ *
+ * // TRIGGER FROM CODE - an immediate, one-off run of that definition, right now
+ * StartManualTransferRunsResponse resp = client.startManualTransferRuns(
+ *     StartManualTransferRunsRequest.newBuilder().setParent(created.getName())
+ *         .setRequestedRunTime(nowAsTimestamp).build());
+ * TransferRun run = resp.getRuns(0);
+ *
+ * // VERIFY - poll the RUN (not a Job - a different resource type) to a terminal state
+ * while (run.getState() == TransferState.PENDING || run.getState() == TransferState.RUNNING) {
+ *     Thread.sleep(2000);
+ *     run = client.getTransferRun(run.getName());
+ * }
+ * // then independently re-check the table the run was SUPPOSED to produce -
+ * // never trust a "succeeded" status alone, the same discipline as every
+ * // other verification in this package
+ * </pre>
+ * A real run: the manual run stayed {@code RUNNING} for roughly 4 minutes
+ * before reaching {@code SUCCEEDED} - real, documented dispatch/execution
+ * latency for BigQuery Data Transfer Service manual runs, meaningfully
+ * slower than a plain {@code Job} for the SAME underlying SQL, because a
+ * scheduled query run goes through the Data Transfer Service's own
+ * scheduling/dispatch layer before the actual query job even starts - a
+ * real cost of the "reusable, triggerable definition" abstraction over a
+ * plain one-shot Job. The output table was independently re-verified at
+ * exactly 200 rows (matching {@link TransformAndPersistDemo}'s
+ * Apparel-only filter), and the transfer config was deleted in the demo's
+ * own {@code finally} block, confirmed via REST
+ * ({@code GET .../transferConfigs} returning {@code {}}) afterward.
+ * <p>
+ * <b>A real setup snag worth keeping, not smoothing over:</b> the first run
+ * failed with {@code FAILED_PRECONDITION: DTS service agent needs
+ * iam.serviceAccounts.getAccessToken permission} - Google's own Data
+ * Transfer Service runs scheduled queries AS the identity that created the
+ * config (backend-dev-sa here), which means DTS's own Google-managed
+ * service agent needs {@code roles/iam.serviceAccountTokenCreator} ON
+ * backend-dev-sa to be able to impersonate it at run time - a ONE-TIME
+ * grant Google's error message itself supplies the exact command for:
+ * <pre>
+ * gcloud iam service-accounts add-iam-policy-binding backend-dev-sa@PROJECT.iam.gserviceaccount.com \
+ *   --member='serviceAccount:service-PROJECT_NUMBER@gcp-sa-bigquerydatatransfer.iam.gserviceaccount.com' \
+ *   --role='roles/iam.serviceAccountTokenCreator'
+ * </pre>
+ * A genuinely different identity-chain shape from every other module's
+ * impersonation pattern (a HUMAN impersonating backend-dev-sa) - here it's
+ * a GOOGLE-OWNED service agent impersonating backend-dev-sa on the
+ * project's behalf, needing the exact same TokenCreator grant either way.
+ * After granting it, the very next attempt still failed identically for
+ * about 45 seconds (real IAM propagation delay, the same phenomenon
+ * {@code _01_iam}'s package-info documents up to ~7 minutes for) before
+ * succeeding - real, worth-expecting latency, not a flake.
+ *
  * <h2>Production practices - what this demo skips that real work needs</h2>
  *
  * <p><b>1. DML is not a replacement for a real OLTP database - the central
@@ -451,17 +567,46 @@
  *       alone. REST confirmed both {@code products} and
  *       {@code apparel_with_tax} existed as genuinely separate tables
  *       side by side before teardown.</li>
+ *   <li>{@link JobDemo} ran the explicit per-operation Job lifecycle (see
+ *       "Two things BigQuery calls a job" above) - job created with a
+ *       developer-assigned ID, already {@code DONE} by the time
+ *       {@code create(...)} returned (a trivial constant-only query),
+ *       {@code totalBytesProcessed: 0}, and successfully re-fetched by ID
+ *       independently of the original handle.</li>
+ *   <li>Enabled {@code bigquerydatatransfer.googleapis.com} and extended
+ *       {@code backendDeveloper} with {@code bigquery.transfers.get/update}.
+ *       {@link ScheduledQueryDemo}'s first run failed with a real,
+ *       informative {@code FAILED_PRECONDITION} - the Data Transfer
+ *       Service's own Google-managed service agent needed
+ *       {@code roles/iam.serviceAccountTokenCreator} on backend-dev-sa to
+ *       impersonate it at run time (Google's own error message supplied
+ *       the exact {@code gcloud iam service-accounts
+ *       add-iam-policy-binding} command - see "Two things BigQuery calls a
+ *       job" above for the full command). Granted it, then hit the same
+ *       error again for about 45 seconds (real IAM propagation delay)
+ *       before a retry succeeded.</li>
+ *   <li>{@link ScheduledQueryDemo} then ran end to end: created a
+ *       {@code TransferConfig} wrapping the Apparel-with-tax CTAS with
+ *       auto-scheduling disabled, triggered one manual run from code,
+ *       polled it through {@code PENDING} -&gt; {@code RUNNING} (real
+ *       dispatch/execution latency - stayed {@code RUNNING} for roughly 4
+ *       minutes, meaningfully slower than a plain Job for the identical
+ *       SQL) -&gt; {@code SUCCEEDED}, independently re-verified the output
+ *       table at exactly 200 rows, then deleted the transfer config in its
+ *       own {@code finally} block - confirmed via REST
+ *       ({@code GET .../transferConfigs} returning {@code {}}) that zero
+ *       transfer configs remain.</li>
  *   <li>Torn down via a single {@code DELETE .../datasets/learning_bq
  *       ?deleteContents=true} REST call (removes the dataset and every
- *       table inside it - {@code employees}, {@code products}, and
- *       {@code apparel_with_tax} all - in one step, HTTP 204 confirmed)
- *       rather than dropping each table individually. Confirmed via REST
- *       ({@code GET .../datasets} returning an empty list, no
- *       {@code datasets} field at all) that zero datasets remain. Unlike
- *       every other paid module in this repo, there was no time-pressure
- *       teardown here - an idle BigQuery dataset costs nothing beyond its
- *       (free-tier-covered) storage, so this cleanup was pure tidiness, not
- *       cost-avoidance.</li>
+ *       table inside it - {@code employees}, {@code products},
+ *       {@code apparel_with_tax}, and {@code apparel_scheduled_demo} all -
+ *       in one step, HTTP 204 confirmed) rather than dropping each table
+ *       individually. Confirmed via REST ({@code GET .../datasets}
+ *       returning an empty list, no {@code datasets} field at all) that
+ *       zero datasets remain. Unlike every other paid module in this repo,
+ *       there was no time-pressure teardown here - an idle BigQuery dataset
+ *       costs nothing beyond its (free-tier-covered) storage, so this
+ *       cleanup was pure tidiness, not cost-avoidance.</li>
  * </ul>
  */
 package com.ashfaq.gcplab._12_bigquery;

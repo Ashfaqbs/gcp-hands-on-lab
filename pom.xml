@@ -77,10 +77,21 @@
 			<groupId>com.google.cloud</groupId>
 			<artifactId>google-cloud-spanner</artifactId>
 		</dependency>
-		<!-- _12_bigquery (SchemaDemo, EmployeeCrudDemo, ProductAnalyticsDemo) -->
+		<!-- _12_bigquery (SchemaDemo, EmployeeCrudDemo, ProductAnalyticsDemo,
+		     TransformAndPersistDemo, JobDemo) -->
 		<dependency>
 			<groupId>com.google.cloud</groupId>
 			<artifactId>google-cloud-bigquery</artifactId>
+		</dependency>
+		<!-- _12_bigquery (ScheduledQueryDemo) - the BigQuery Data Transfer
+		     Service client, for creating/triggering/checking Scheduled
+		     Queries (BigQuery's recurring/on-demand "job" concept, distinct
+		     from the per-operation Job object google-cloud-bigquery above
+		     already exposes - see package-info.java's "Two things BigQuery
+		     calls a job" section). -->
+		<dependency>
+			<groupId>com.google.cloud</groupId>
+			<artifactId>google-cloud-bigquerydatatransfer</artifactId>
 		</dependency>
 		<!-- _08_vertexai (GeminiPromptDemo, SimpleRagDemo, SimpleAgentDemo) -
 		     the modern unified Gemini SDK, NOT covered by libraries-bom,
