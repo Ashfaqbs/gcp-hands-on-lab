@@ -259,5 +259,136 @@
  * stemming, stop-words, n-grams for typo tolerance) tuned to the actual
  * catalog's vocabulary - the "zero tuning" comparison in this module is
  * explicitly the floor both systems start from, not either one's ceiling.
+ *
+ * <h2>Production practices - what this demo skips that real work needs</h2>
+ * This module's single-node, security-disabled VM was a deliberate,
+ * explicitly-called-out shortcut for a short-lived learning exercise (see
+ * "How the VM and Elasticsearch were set up" above) - every item below is a
+ * real production requirement this setup does NOT meet, and should never
+ * be copied as-is into anything real.
+ *
+ * <p><b>1. Security must be ON - this module's biggest "don't copy this"
+ * item.</b> {@code xpack.security.enabled=false} was an explicit, called-out
+ * shortcut for a throwaway VM protected only by a firewall rule scoped to
+ * one IP. A production cluster needs X-Pack security genuinely enabled:
+ * TLS on the transport layer (node-to-node) AND the HTTP layer (client-to-
+ * cluster), real authentication (native realm, or SSO/LDAP/SAML/OIDC via
+ * Elastic Stack security features), and role-based access control down to
+ * the index/field/document level (e.g. a search-serving API key that can
+ * only READ the products index, never write or delete it, versus an
+ * ingestion pipeline's separate write-only credential) - "the firewall is
+ * the security" is acceptable for a single learner's throwaway VM and
+ * genuinely not acceptable for anything with real user data or shared
+ * network access.
+ *
+ * <p><b>2. Cluster topology - dedicated node roles once past a single
+ * node.</b> This module ran ONE node acting as master, data, and
+ * coordinating node simultaneously (fine at this scale, explicitly noted as
+ * a 1-node "cluster"). A real production cluster separates these roles:
+ * (a) 3 dedicated MASTER-ELIGIBLE nodes (always an odd number - this
+ * specifically avoids a "split-brain" scenario where a network partition
+ * lets two halves of a cluster each elect their own master and diverge),
+ * small/cheap since they don't hold data or serve queries; (b) DATA nodes
+ * (the expensive, storage/CPU-heavy ones, scaled out as the index grows);
+ * (c) optionally dedicated COORDINATING nodes (accept client requests,
+ * fan out to data nodes, merge results - useful once query fan-out volume
+ * alone becomes a bottleneck) and INGEST nodes (run ingest pipelines before
+ * indexing). Conflating these roles on one node, as this module does, is a
+ * single point of failure and a scaling ceiling.
+ *
+ * <p><b>3. Shard sizing - a real, easy-to-get-wrong capacity decision.</b>
+ * This module's {@code products} index used Elasticsearch's default shard
+ * count for a tiny (703-document) index - never a decision that mattered
+ * at this scale. In production, shard count is set at INDEX CREATION and
+ * is expensive to change later (requires reindexing) - the commonly-cited
+ * rule of thumb is keeping each shard in the 10-50GB range: too many small
+ * shards wastes cluster overhead (each shard has real per-shard memory/CPU
+ * cost regardless of how little data it holds - "oversharding"), too few
+ * large shards limits how much a query can parallelize and slows recovery
+ * after a node failure. Getting this right requires knowing the expected
+ * data volume and growth rate up front, not defaults.
+ *
+ * <p><b>4. Index Lifecycle Management (ILM) - for anything time-series or
+ * continuously growing.</b> Not relevant to this module's static 703-
+ * product catalog, but core to production Elasticsearch for logs/events/
+ * search-analytics data: ILM policies automate moving indices through
+ * hot (fast, expensive storage, actively written) -&gt; warm (read-only,
+ * cheaper storage) -&gt; cold/frozen (rarely accessed, cheapest) -&gt; delete
+ * phases automatically, paired with index ROLLOVER (start a fresh index
+ * once the current one hits a size/age/doc-count threshold, all addressed
+ * transparently through a stable alias) - the standard pattern for search-
+ * query logs, click/conversion event streams, or any continuously-appended
+ * dataset a search team would actually log.
+ *
+ * <p><b>5. Zero-downtime mapping changes - alias-based reindexing, never an
+ * in-place field-type change.</b> As noted above, a field's type can't be
+ * changed after documents are indexed. The production pattern: create a
+ * NEW index with the corrected mapping, use the {@code _reindex} API to
+ * copy data across (optionally with a script transforming fields), verify
+ * the new index, then atomically flip a stable ALIAS (e.g. {@code
+ * products}) from the old index to the new one - client code always
+ * queries the alias, never a literal index name, so this swap is
+ * invisible to callers. This module's {@link CatalogIndexDemo} indexes
+ * directly into a literal {@code products} index name - fine for a one-shot
+ * demo, a real ingestion pipeline should create versioned indices
+ * ({@code products-v1}, {@code products-v2}) behind an alias from day one.
+ *
+ * <p><b>6. Bulk indexing tuning - beyond just "use the Bulk API."</b> This
+ * module's {@link CatalogIndexDemo} already does the right first step
+ * (Bulk API, not per-document PUT), but a real high-volume ingestion
+ * pipeline additionally tunes: refresh interval (temporarily set
+ * {@code index.refresh_interval: -1} during a large bulk load, since every
+ * refresh has a real cost and isn't needed until the load finishes, then
+ * restore it), replica count (temporarily 0 during initial bulk load,
+ * restored after - replicating writes twice during the load is pure
+ * overhead), and bulk request SIZE (too small wastes round-trips, too
+ * large risks hitting the circuit breaker / OOM on the receiving node -
+ * commonly tuned in the 5-15MB per bulk request range, verified
+ * empirically per cluster, not assumed).
+ *
+ * <p><b>7. Monitoring - cluster health is a real, checkable signal, not
+ * just "is it up."</b> {@code GET _cluster/health} returns green/yellow/red
+ * (yellow = a replica is unassigned somewhere, usually recoverable; red =
+ * a PRIMARY shard is unassigned, real data unavailability) - this should
+ * be an actual alerting signal, not something checked manually. Beyond
+ * that: JVM heap usage (Elasticsearch runs on the JVM - see this module's
+ * {@code -Xms1g -Xmx1g} heap flags - sustained high heap usage precedes GC
+ * pauses that stall queries), thread pool rejection counts (a queue filling
+ * up means the cluster is genuinely saturated, not just slow), and
+ * disk-watermark thresholds (Elasticsearch automatically stops allocating
+ * new shards to a node past a configured disk-usage percentage, a common
+ * real incident when nobody's watching disk growth). Elastic's own stack
+ * monitoring (or exporting metrics to Cloud Monitoring) is how real teams
+ * observe this instead of ad-hoc {@code curl} checks like this module's
+ * verification steps.
+ *
+ * <p><b>8. Query-time production habits this module's demos didn't need.</b>
+ * Deep pagination via {@code from}/{@code size} degrades badly past a few
+ * thousand results (every shard has to sort and return {@code from+size}
+ * results just to discard the first {@code from}) - use
+ * {@code search_after} with a stable sort for genuine deep pagination
+ * (infinite scroll, export jobs), not {@code from}/{@code size}. Leading-
+ * wildcard queries ({@code "*ampoo"}) can't use the index efficiently and
+ * degrade toward a full scan - if prefix/substring search is a real
+ * requirement, model it at INDEX time instead (an n-gram analyzer, or a
+ * dedicated {@code completion} field for autocomplete) rather than a
+ * wildcard query at search time. {@link SearchQualityCompareDemo}'s plain
+ * {@code multi_match} sidesteps both issues at this module's tiny scale,
+ * but neither concern shows up until real query volume and result-set
+ * depth exist.
+ *
+ * <p><b>9. Client code habits - connection reuse and retry, not a new
+ * client per call.</b> {@link CatalogIndexDemo} and {@link
+ * SearchQualityCompareDemo} both use plain {@code java.net.http.HttpClient}
+ * directly against the REST API - a deliberate, explicitly-noted choice to
+ * avoid adding a client library dependency for this module. A real service
+ * should reuse ONE {@code HttpClient} (it manages its own connection pool -
+ * same "build once, reuse for the app's lifetime" rule as every other
+ * client in this repo) rather than constructing one per call, and add
+ * retry-with-backoff around transient 5xx/timeout responses - Elastic's own
+ * official Java clients (the modern {@code co.elastic.clients:
+ * elasticsearch-java}) handle connection pooling, retries, and request/
+ * response (de)serialization automatically and are the right choice for
+ * anything beyond a small, dependency-free learning exercise like this one.
  */
 package com.ashfaq.gcplab._10_elasticsearch;

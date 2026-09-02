@@ -182,5 +182,109 @@
  * one flat query" - get that wrong and you end up doing N sequential reads
  * in application code to reassemble what a single SQL JOIN would have done
  * in one round trip.
+ *
+ * <h2>Production practices - what this demo skips that real work needs</h2>
+ * Everything below is a real gap between {@link EmployeeDocCrudDemo} (a
+ * correctness demo) and a production Firestore integration - the intent is
+ * that none of it should require a search/Slack/StackOverflow detour later.
+ *
+ * <p><b>1. Hotspotting - the single most common real Firestore production
+ * incident.</b> Firestore shards by document key range, similar in spirit
+ * to Spanner's splits (see {@code _11_spanner}'s Internal architecture).
+ * Writing documents with a MONOTONICALLY INCREASING key - an
+ * auto-incrementing counter, or worse, a raw timestamp as the document ID
+ * (e.g. logging events keyed by {@code eventTimestamp}) - concentrates every
+ * new write on the SAME shard at the SAME moment, hard-capping write
+ * throughput on that one hot range regardless of how much the database
+ * could theoretically handle overall. This module's fixed {@code "emp-1"}
+ * ID never exercises this because it's a single document, but any
+ * production collection doing high-volume writes with client-assigned
+ * sequential IDs will hit this. Fixes: let Firestore auto-generate the
+ * document ID (random, well-distributed by design -
+ * {@code collection.document()} with no ID argument), or if a
+ * business-meaningful key is required, hash or reverse it before use (e.g.
+ * a reversed/hashed timestamp prefix) to scatter writes across the
+ * keyspace.
+ *
+ * <p><b>2. Composite indexes are NOT automatic, and a missing one fails
+ * loudly, in production, not at dev time.</b> Firestore auto-indexes every
+ * single field, but a query filtering/sorting on MULTIPLE fields together
+ * needs an explicit composite index - the SDK throws a
+ * {@code FAILED_PRECONDITION} with a direct Console link to create it the
+ * first time an un-indexed compound query actually runs. In production this
+ * means: define {@code firestore.indexes.json} and deploy it as part of
+ * CI/CD ({@code gcloud firestore indexes composite create} or
+ * {@code firebase deploy --only firestore:indexes}) BEFORE the query ships,
+ * never rely on hitting the error in prod traffic and clicking the Console
+ * link reactively - that's a production incident, not a debugging step, the
+ * first time it happens under real load. This module's queries are all
+ * single-field reads by document ID, so this was never exercised - a real
+ * search-team collection (e.g. product-affinity or session data queried by
+ * multiple filter fields) will need this from day one.
+ *
+ * <p><b>3. Transactions have real limits, and contention causes retries, not
+ * failures.</b> A single transaction is capped at 500 document writes and
+ * has a request-size ceiling; exceeding either fails outright, not
+ * partially - batch large writes across multiple transactions/batched
+ * writes deliberately. Under write contention (two transactions touching
+ * the same document concurrently), Firestore aborts the loser with
+ * {@code ABORTED} rather than blocking - the client library retries
+ * automatically with backoff by default, but code that catches and swallows
+ * exceptions around a transaction can silently turn a transient contention
+ * retry into a dropped write; let the SDK's retry do its job and only
+ * catch/handle the FINAL failure after retries are exhausted.
+ *
+ * <p><b>4. TTL policies for auto-expiring data</b> (sessions, carts, OTPs,
+ * search-result caches stored in Firestore) - a field marked as the
+ * collection's TTL policy (via Console or {@code gcloud firestore fields
+ * ttls update}) gets background-deleted by Firestore automatically once
+ * past its timestamp, at no per-delete cost beyond the storage already
+ * being billed - the correct alternative to a cron job manually scanning
+ * and deleting expired documents (which burns read+delete operation
+ * quota AND lags behind the real expiry time).
+ *
+ * <p><b>5. Backups - export/import, not a "snapshot" button.</b>
+ * {@code gcloud firestore export gs://bucket/path} triggers a managed,
+ * consistent export of the whole database (or specific collections) to
+ * GCS, restorable via {@code gcloud firestore import} - schedule this via
+ * Cloud Scheduler + a Cloud Function/Cloud Run job for a real backup
+ * cadence, since nothing does this automatically by default. Point-in-time
+ * recovery (continuous, restore to any second in the last 7 days, not just
+ * scheduled export snapshots) is a separate, additionally-billed feature to
+ * enable explicitly per database if the RPO of daily/hourly exports isn't
+ * tight enough.
+ *
+ * <p><b>6. Real-time listeners at scale - a resource a client MUST close.</b>
+ * Not exercised by this module's plain CRUD demo, but core to why teams
+ * reach for Firestore: {@code collection.addSnapshotListener(...)} opens a
+ * persistent watch stream (see Internal architecture above) that keeps
+ * pushing updates until explicitly removed - a service that opens listeners
+ * per-request without closing them (e.g. one per HTTP request in a web
+ * backend) leaks open streams and will eventually hit the per-project
+ * concurrent-listener ceiling; listeners belong on long-lived
+ * connections/sessions (a WebSocket to a browser client, a long-running
+ * worker), not spun up and abandoned per short-lived request.
+ *
+ * <p><b>7. Testing - use the emulator, never real Firestore in CI/unit
+ * tests.</b> {@code gcloud emulators firestore start} runs a fully local,
+ * zero-cost, zero-network Firestore-compatible server -
+ * {@code FirestoreOptions.newBuilder().setEmulatorHost("localhost:8080")}
+ * points the same client code at it with no other code changes. Running
+ * automated tests against a real GCP project (as every demo in this module
+ * does, deliberately, for a LEARNING exercise proving real API behavior) is
+ * the wrong pattern for CI - it's slow, costs real (if tiny) money per test
+ * run, and pollutes a real project with test data; the emulator exists
+ * specifically to make Firestore unit/integration tests fast, free, and
+ * hermetic.
+ *
+ * <p><b>8. Code-level habit this module's demo doesn't need to show:</b> a
+ * production service should hold ONE {@code Firestore} client instance for
+ * the whole app's lifetime (it's a heavyweight object managing its own
+ * gRPC channel pool) - never construct a new
+ * {@code FirestoreOptions.newBuilder()...getService()} per request, which
+ * this module's {@code main()}-per-CLI-invocation demo does simply because
+ * each run IS the whole process lifetime; a real Spring service should
+ * build this once as a {@code @Bean} and inject it everywhere, closing it
+ * only on application shutdown.
  */
 package com.ashfaq.gcplab._06_firestore;

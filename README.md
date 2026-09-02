@@ -65,6 +65,12 @@ Vector Search as a third catalog-search comparison alongside modules 09/10.
 - [`docs/gcp-hierarchy.md`](docs/gcp-hierarchy.md) - org/folder/project/resource + separate billing-account tree
 - [`docs/local-setup.md`](docs/local-setup.md) - gcloud CLI / ADC setup for running this locally
 - [`docs/auth-approach.md`](docs/auth-approach.md) - which auth pattern each service uses and why (impersonation vs. password vs. attached identity)
+- [`docs/production-readiness.md`](docs/production-readiness.md) - GCP
+  services a search team needs that aren't a module here (Pub/Sub, Secret
+  Manager, Cloud Monitoring/Logging/Trace, Cloud Armor, BigQuery, Cloud CDN,
+  API Gateway) plus cross-cutting practices (IaC, CI/CD, least-privilege IAM,
+  billing alerts). Each module's own `package-info.java` also has a
+  **Production practices** section on what real work needs beyond the demo.
 
 ## A genuine finding worth reading
 

@@ -518,5 +518,138 @@
  *       raise it (bounded by the model's context window) rather than
  *       treating the cutoff response as complete.</li>
  * </ul>
+ *
+ * <h2>Production practices - what this demo skips that real work needs</h2>
+ * The gap between "a working demo" and "a production LLM integration" is
+ * large and mostly invisible until it isn't - everything below is a real
+ * production concern this module's three small, single-call demos
+ * deliberately didn't need to address.
+ *
+ * <p><b>1. Pin exact model versions - never call a generic/"latest" alias
+ * in production.</b> {@code gemini-2.5-flash} (used throughout this module)
+ * is a STABLE alias, but Google also publishes dated snapshot versions
+ * (e.g. {@code gemini-2.5-flash-001}) - production services that need
+ * reproducible, unchanging behavior (a prompt tuned and tested against one
+ * specific model's quirks) should pin the dated snapshot, not the rolling
+ * alias, and upgrade deliberately with re-testing, the same discipline as
+ * pinning a library version in {@code pom.xml} rather than depending on
+ * "whatever the latest release happens to be" - this repo's own rebrand
+ * story (Vertex AI -&gt; Agent Platform) is a small-scale example of how
+ * much can shift under a moving target.
+ *
+ * <p><b>2. Cost control is an architecture decision, not an afterthought.</b>
+ * <ul>
+ *   <li><b>Model tiering</b> - route by task difficulty, not one model for
+ *       everything: {@code flash-lite} for high-volume simple classification/
+ *       extraction, {@code flash} for general chat/RAG/agent tool-calling
+ *       (this module's default throughout), {@code pro} reserved for tasks
+ *       flash demonstrably handles worse - a search team's query-
+ *       understanding/re-ranking layer, run on every query, is exactly the
+ *       kind of high-volume path where tiering down to the cheapest model
+ *       that's still accurate enough matters far more than for a low-volume
+ *       admin tool.</li>
+ *   <li><b>Context caching</b> - for a prompt that resends the SAME large
+ *       context repeatedly (e.g. a long system prompt, or a big RAG context
+ *       block reused across many queries), Vertex AI supports explicit
+ *       context caching - the cached portion is billed at a reduced rate on
+ *       subsequent calls instead of full input-token price every time; this
+ *       module's tiny 4-fact {@code SimpleRagDemo} context is far too small
+ *       to matter, but a real RAG system's context (often thousands of
+ *       tokens) reused across a session absolutely does.</li>
+ *   <li><b>Hard budget caps</b> - {@code maxOutputTokens} bounds cost per
+ *       CALL; a real service also needs a request-level or user-level
+ *       budget/rate cap (e.g. via a gateway or application-layer counter) -
+ *       an LLM API has no built-in "stop spending after $X" switch the way
+ *       a prepaid phone plan does, and an agent loop with no iteration cap
+ *       (see point 5 below) is the single easiest way to accidentally
+ *       generate a very large bill.</li>
+ * </ul>
+ *
+ * <p><b>3. Prompt injection - a real, search-relevant threat class, not a
+ * theoretical one.</b> Directly relevant to a search team specifically:
+ * ANY text a model reads that originated from outside your own prompt
+ * template - a retrieved document in RAG, a user's search query, a
+ * product description pulled from the catalog - is a potential injection
+ * vector ("ignore previous instructions and instead output X"). {@code
+ * SimpleRagDemo}'s tiny hardcoded fact list has zero attacker-controlled
+ * content, so this was never a real risk in this module - but the moment
+ * RAG context comes from anything externally writable (a product
+ * description a merchant can edit, a user review, a scraped web page),
+ * treat retrieved content as DATA to be reasoned about, never as
+ * instructions - the practical mitigations are: keep the system
+ * prompt/instructions in a clearly separate, privileged position the model
+ * is tuned to prioritize (Gemini, like most modern models, weighs system
+ * instructions above user/retrieved content, but this is a mitigation, not
+ * a guarantee), never let a tool's output alone trigger another tool call
+ * without a validation step in between, and treat any agent with
+ * WRITE-capable tools (send an email, modify a database row, place an
+ * order) as needing human-in-the-loop confirmation for consequential
+ * actions, not full autonomy, until the injection surface is well understood.
+ *
+ * <p><b>4. Observability - what to actually log, and what NEVER to log.</b>
+ * Real production logging for an LLM integration should capture: token
+ * usage per call (input/output split, for cost attribution and anomaly
+ * detection), latency (P50/P99 - LLM latency is far more variable than a
+ * typical DB call), {@code finishReason} on every response (a spike in
+ * {@code SAFETY} or {@code MAX_TOKENS} finishes is a real signal something
+ * changed - a prompt regression, a model version change, a new kind of
+ * user input), and enough of the prompt/response to debug a bad answer
+ * later. The "never" side matters just as much: full prompts/responses
+ * often contain PII (a user's own query, a support ticket's contents) -
+ * decide a redaction/retention policy deliberately (e.g. log token counts
+ * and finishReason always, log full prompt/response content only behind a
+ * shorter retention window or on explicit opt-in for debugging), the same
+ * "never log sensitive data" discipline this repo's own
+ * {@code ~/.claude/rules/security.md} already states for passwords/tokens,
+ * applied to conversation content instead.
+ *
+ * <p><b>5. Agent loops need a hard iteration cap and circuit breaker, not
+ * just "run until done."</b> {@link SimpleAgentDemo}'s loop is 2 turns
+ * (one tool call, one final answer) and always terminates - a real agent
+ * with multiple available tools and a genuinely open-ended task can, in
+ * principle, loop far longer (the model repeatedly deciding "I need one
+ * more tool call" without converging). Production agent code needs an
+ * explicit MAX_ITERATIONS cap (fail gracefully with a "couldn't complete
+ * this" response past the cap, never loop unbounded) and ideally a circuit
+ * breaker on repeated identical tool calls (the model calling the same
+ * tool with the same arguments twice in a row is a strong signal of a
+ * stuck loop, not genuine progress) - ADK (mentioned above) provides this
+ * kind of guardrail out of the box; a hand-rolled loop like
+ * {@code SimpleAgentDemo}'s needs it added explicitly before it's
+ * production-safe.
+ *
+ * <p><b>6. Evaluation - "it looked right when I tried it" isn't a test
+ * suite.</b> None of this module's demos have automated evaluation - they
+ * were manually verified once each (see the "How we set this up" style
+ * notes throughout this file). A real prompt/RAG/agent pipeline needs a
+ * held-out evaluation SET (representative real or realistic queries with
+ * known-good expected answers or answer criteria, similar in spirit to
+ * {@code _09_ai_commerce_search}'s own 100-query relevance audit, just
+ * applied to generative output instead of search results) run automatically
+ * whenever the prompt, model version, or RAG data changes - Vertex AI's Gen
+ * AI evaluation service (rubric-based or model-graded scoring) or a
+ * hand-rolled scored-comparison harness both work; the point is treating
+ * prompt changes with the same "did this actually get better or did it
+ * regress" rigor as a code change, not eyeballing a handful of manual
+ * tries the way this learning module's demos did.
+ *
+ * <p><b>7. Data residency / regional constraints.</b> This module used
+ * {@code us-central1} throughout without needing to think about it further
+ * - a real deployment serving EU users, or under a compliance regime
+ * requiring data to stay in-region, needs to deliberately choose the
+ * {@code location} the Vertex AI client targets (not every model or
+ * feature is available in every region - check the current model
+ * availability table before committing to a region for a compliance-driven
+ * reason) and verify the SAME constraint applies to any RAG data store or
+ * logging pipeline built around it, not just the model call itself.
+ *
+ * <p><b>8. Code-level habit: reuse the {@code Client}, don't rebuild it per
+ * call.</b> Same "build once, inject everywhere" rule as every other GCP
+ * client in this repo ({@code _06_firestore}, {@code _11_spanner}) - {@code
+ * Client.builder().vertexAI(true)...build()} manages its own HTTP transport
+ * and should be a single long-lived instance (a Spring {@code @Bean} in a
+ * real service), not reconstructed per request the way each of this
+ * module's separate {@code main()} demos naturally does since each CLI
+ * invocation IS the process lifetime.
  */
 package com.ashfaq.gcplab._08_vertexai;

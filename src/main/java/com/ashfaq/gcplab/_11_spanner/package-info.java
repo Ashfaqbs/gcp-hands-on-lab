@@ -273,5 +273,108 @@
  *       Confirmed via {@code gcloud spanner instances list} returning zero
  *       items. Total instance lifetime: well under 15 minutes.</li>
  * </ul>
+ *
+ * <h2>Production practices - what this demo skips that real work needs</h2>
+ *
+ * <p><b>1. Primary key hotspotting - the #1 real-world Spanner production
+ * mistake, and one this module's OWN demo code is a live example of.</b>
+ * {@link EmployeeCrudDemo} uses a FIXED key
+ * ({@code "11111111-1111-1111-1111-111111111111"}) deliberately, so
+ * separate {@code create}/{@code read}/{@code update}/{@code delete} CLI
+ * runs (each its own JVM process) target the same row - fine for a
+ * teaching demo, but notice the key is also front-loaded with identical
+ * leading characters, which is exactly the shape that hotspots a real
+ * table: Spanner splits by primary-key RANGE, so any pattern that clusters
+ * many rows' keys close together in sort order (sequential integers,
+ * timestamps, or - as here - a batch of near-identical UUIDs) drives most
+ * writes onto the same split/machine, capping throughput far below what
+ * the instance could otherwise handle. Real schema design either uses a
+ * genuinely random UUID (v4, not v1 which is time-ordered and therefore
+ * ALSO hotspots) or explicitly bit-reverses/hashes a sequential ID before
+ * using it as the key - Spanner's own docs specifically warn against both
+ * auto-increment integer keys and raw timestamp keys for this reason,
+ * unlike Postgres/MySQL where auto-increment is the default, safe choice.
+ *
+ * <p><b>2. Session pooling - handled by the client library, but tunable and
+ * worth understanding.</b> Every read/write goes through a Spanner
+ * "session" (a stateful handle to the database) - the Java client
+ * maintains its OWN internal session pool (default min/max sizes are
+ * usually fine, but tunable via {@code SessionPoolOptions} on
+ * {@code SpannerOptions} for high-throughput services) and reuses sessions
+ * across calls automatically; {@link EmployeeCrudDemo}'s per-CLI-invocation
+ * {@code Spanner} instance never lives long enough to show pool reuse
+ * mattering, but a real service builds ONE {@code Spanner}/{@code
+ * DatabaseClient} instance for its whole lifetime (same rule as
+ * {@code _06_firestore}'s client-reuse note) - creating a new one per
+ * request defeats the pool entirely and adds real per-request session-
+ * creation latency.
+ *
+ * <p><b>3. Autoscaling - don't hand-tune processing units under real
+ * traffic.</b> Spanner supports a native Autoscaler (configure a min/max
+ * processing-unit range and a target CPU utilization, typically ~65% -
+ * Google's own guidance is to keep sustained CPU under that threshold for
+ * headroom on traffic spikes) instead of manually resizing an instance's
+ * capacity - this module's fixed 100 processing units was chosen purely to
+ * minimize cost for a short-lived demo, never a production sizing decision.
+ * The <b>Key Visualizer</b> (Console, per-database, appears automatically
+ * once there's enough traffic history) is the tool for actually SEEING
+ * hotspots as a visual heatmap of read/write load across the keyspace -
+ * the practical way real teams diagnose issue #1 above instead of
+ * guessing.
+ *
+ * <p><b>4. Read staleness - a real latency/consistency trade-off knob most
+ * teams under-use.</b> Every read in {@link EmployeeCrudDemo} is a
+ * strong (fully consistent, most expensive) read by default. For read-heavy
+ * paths that can tolerate slightly-stale data (a product catalog display,
+ * not a balance check), {@code TimestampBound.ofExactStaleness(...)} or
+ * {@code ofMaxStaleness(...)} lets a read hit the nearest replica instead
+ * of coordinating for the absolute latest value - meaningfully lower
+ * latency at real scale, and the correct lever to reach for before assuming
+ * more compute capacity is the fix for read-latency complaints.
+ *
+ * <p><b>5. Bulk operations - Partitioned DML, not a loop of single
+ * mutations.</b> {@link EmployeeCrudDemo}'s single-row delete is fine at
+ * this scale; deleting/updating millions of rows via a client-side loop of
+ * individual mutations is both slow and a good way to create the exact
+ * hotspot pattern in #1 (many writes touching adjacent keys in a tight
+ * loop). {@code executePartitionedUpdate}/{@code -Delete} runs the
+ * statement as a distributed, parallelized operation across the whole
+ * keyspace server-side - the correct tool for "delete every row matching
+ * X" at real volume, analogous to {@code _09_ai_commerce_search}'s
+ * {@code purgeProductsAsync} existing specifically so nobody writes a
+ * 703-iteration DeleteProduct loop.
+ *
+ * <p><b>6. Backups and DR.</b> Automated backups (configurable schedule,
+ * retained per policy) plus continuous Point-In-Time Recovery (restore to
+ * any point in the last 1-7 days, configurable window) are both real,
+ * separately-billed features to enable explicitly - nothing backs up a
+ * Spanner database by default. For genuinely global availability
+ * requirements, a multi-region instance configuration (not used in this
+ * module's single-region setup) synchronously replicates across 3+ regions
+ * for a 99.999% SLA, at roughly 3x the base cost of a comparable regional
+ * config - a deliberate trade only worth making for a service that
+ * actually needs that SLA tier.
+ *
+ * <p><b>7. IAM - use the built-in granular roles, not project-Owner.</b>
+ * This module extended {@code backendDeveloper} with specific data-plane
+ * permissions (see "How we set this up" above) rather than reaching for
+ * Google's predefined {@code roles/spanner.databaseUser} (data read/write,
+ * no schema changes), {@code roles/spanner.databaseReader} (read-only - the
+ * right grant for an analytics/reporting service that should never write),
+ * or {@code roles/spanner.databaseAdmin} (schema changes, should be
+ * reserved for deploy-time migration tooling, never a running
+ * application's own identity) - real production IAM should default to
+ * these predefined roles unless a custom role's narrower permission set is
+ * a deliberate, documented choice (as it is here, matching this repo's
+ * "one shared backendDeveloper custom role" pattern across every module).
+ *
+ * <p><b>8. Testing - the Spanner emulator, same reasoning as Firestore's.</b>
+ * {@code gcloud emulators spanner start} runs a local, free,
+ * fully-compatible emulator - point {@code SpannerOptions} at it via
+ * {@code setEmulatorHost("localhost:9010")} for CI/unit tests instead of
+ * ever running automated tests against a real, billed instance the way
+ * this module's own manual verification run did (appropriate here, since
+ * the goal was proving real API behavior end to end - wrong for a CI
+ * pipeline that runs on every commit).
  */
 package com.ashfaq.gcplab._11_spanner;

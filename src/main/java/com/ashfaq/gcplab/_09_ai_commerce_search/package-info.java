@@ -675,5 +675,135 @@
  * ranking ORDER (the array order of results, which is the actual, fully-
  * supported relevance signal) over trying to reverse-engineer meaning from
  * this map.
+ *
+ * <h2>Production practices - what this demo skips that real work needs</h2>
+ * This module proved the API works end to end on a static, one-shot-
+ * imported catalog with zero real traffic - a production search-team
+ * integration around this same API looks meaningfully different in the
+ * ways below.
+ *
+ * <p><b>1. Catalog sync is a continuous pipeline, not a one-time bulk
+ * import.</b> {@link CatalogImportDemo}'s 8-batch {@code ImportProducts}
+ * call was a one-shot load appropriate for standing up a test catalog.
+ * Real production catalogs change constantly - price updates, stock-level
+ * changes, new/discontinued items - and need a genuine sync strategy:
+ * single-item {@code UpdateProduct} calls (synchronous, low-latency) driven
+ * off the source-of-truth inventory/pricing system's own change events
+ * (typically via a Pub/Sub topic the catalog system publishes to, consumed
+ * by a small service that translates each change into a Retail API call),
+ * with periodic FULL re-imports as a reconciliation safety net (catches
+ * any drift from missed events) rather than the primary update mechanism.
+ * A catalog that's only ever bulk-reimported daily means real inventory/
+ * price changes are stale in search results for up to a day - a genuine
+ * customer-facing bug for anything time-sensitive (a sold-out item still
+ * showing as purchasable).
+ *
+ * <p><b>2. UserEvents need a real streaming architecture, not a demo call
+ * per event.</b> The "UserEvents" section above shows the API call shape;
+ * production volume (every search impression, every product view, every
+ * add-to-cart) is far too high-frequency to call {@code WriteUserEvent}
+ * synchronously from the request path that's serving the shopper. The
+ * standard pattern: emit events to Pub/Sub (or a similar durable queue)
+ * from wherever the event actually happens (search results rendered,
+ * button clicked), with a separate consumer service batching and
+ * forwarding them to the Retail API asynchronously - this decouples
+ * "the event happened" from "Google has ingested it," so a slow or
+ * temporarily-failing UserEvent write never adds latency to (or breaks)
+ * the actual shopper-facing request. {@code ImportUserEvents} (bulk,
+ * same async-Operation shape as ImportProducts) exists specifically for
+ * backfilling historical event data from a data warehouse when
+ * bootstrapping Recommendations for an existing catalog.
+ *
+ * <p><b>3. A/B testing serving configs - how real ranking changes get
+ * validated safely.</b> This module's {@code default_search} serving
+ * config was the only one ever created or queried - real search teams
+ * create MULTIPLE serving configs (e.g. {@code default_search} and {@code
+ * default_search_experiment_boost_v2}) with different business
+ * rules/boost configuration, and split live traffic between them (a
+ * simple hash-based split in the calling application, or Google's built-in
+ * experiment support) to measure whether a tuning change (a new boost
+ * rule, an enabled semantic-retrieval feature) genuinely improves real
+ * click-through/conversion before rolling it out to 100% of traffic -
+ * exactly the rigor this module's own 100-query manual audit approximated
+ * offline, but a production team needs the equivalent measurement running
+ * continuously against real behavior, not a one-time manual scoring pass.
+ *
+ * <p><b>4. Caching in front of Search - a real latency/cost lever, with a
+ * real invalidation problem.</b> High-frequency, low-cardinality queries
+ * (top search terms, category browse pages) are strong candidates for a
+ * cache layer (this repo's own {@code _05_redis} module is the natural
+ * fit) in front of the Search API - cuts both latency (a Redis GET beats a
+ * network round-trip to Retail Search) and the per-request cost noted in
+ * the Pricing section above. The real complexity is INVALIDATION: a cached
+ * search response goes stale the moment the underlying catalog/inventory
+ * changes (see point 1) or a UserEvent-driven ranking update lands - a
+ * short, deliberately-chosen TTL (see {@code _06_firestore}'s TTL note for
+ * the analogous idea) is usually simpler and safer than trying to
+ * precisely invalidate cache entries on every catalog change, accepting
+ * some bounded staleness in exchange for not needing a perfect invalidation
+ * pipeline.
+ *
+ * <p><b>5. The KPIs a search team actually watches - beyond "does it
+ * return results."</b> This module's audit measured relevance by hand,
+ * once, offline. A production search system needs these tracked
+ * continuously, typically via Cloud Monitoring dashboards fed by
+ * application-level logging alongside the Retail API's own metrics:
+ * <ul>
+ *   <li><b>Zero-results rate</b> - the % of searches returning nothing -
+ *       directly the failure mode this module's own audit found on 16 of
+ *       25 descriptive-bucket queries; in production this is a real,
+ *       trackable time-series metric, not a one-time finding, and a spike
+ *       in it is an actionable alert (a new synonym gap, a catalog import
+ *       that silently dropped attributes, a bad merchandising rule).</li>
+ *   <li><b>Click-through rate (CTR) on search results, by position</b> -
+ *       the real-world feedback signal Recommendations/learned ranking
+ *       trains on (see the UserEvents section) - also a direct relevance
+ *       proxy: a query where position-1 results get abnormally low CTR is
+ *       a candidate for manual review even without a human re-scoring
+ *       every query the way this module's audit did.</li>
+ *   <li><b>Search-to-conversion rate</b> - the actual business metric
+ *       (search led to an add-to-cart/purchase) - relevance is a means to
+ *       this end, not the end itself; a query can score well on a manual
+ *       relevance rubric and still convert poorly for reasons a relevance
+ *       audit alone won't catch (price, availability, image quality).</li>
+ *   <li><b>Search latency (P50/P99)</b> and <b>quota utilization</b>
+ *       against the limits in the "Scale limits" table above - so a quota
+ *       increase request happens BEFORE hitting {@code RESOURCE_EXHAUSTED}
+ *       under real load, not reactively during an incident.</li>
+ * </ul>
+ *
+ * <p><b>6. Never call this API directly from a browser/mobile client with
+ * unrestricted credentials.</b> Every demo in this module authenticates
+ * server-side (impersonated backend-dev-sa, see {@code
+ * docs/auth-approach.md}) - the correct production pattern too. A
+ * client-side app should call YOUR OWN backend, which then calls the
+ * Retail API server-side, never embed a credential capable of {@code
+ * ImportProducts}/{@code PurgeProducts}/{@code DeleteProduct} anywhere a
+ * browser or mobile app can reach it - the blast radius of a leaked
+ * catalog-admin-capable credential (an attacker can wipe or corrupt the
+ * entire live catalog, see {@link CatalogPurgeDemo}'s {@code filter="*"}
+ * bulk-delete capability) is a genuine production-incident class, not a
+ * theoretical concern.
+ *
+ * <p><b>7. Load-test before predictable traffic spikes.</b> The default
+ * 300 searches/minute quota (and the write-side quotas in the "Scale
+ * limits" table) are per-project defaults - a search team anticipating a
+ * major traffic event (a sale, a marketing campaign, a product launch)
+ * should request quota increases and load-test the integration well
+ * BEFORE the event, not discover a quota ceiling live during it; this is
+ * the same "request increases proactively" discipline noted for
+ * {@code _08_vertexai}'s rate limits, applied to Search's own quotas.
+ *
+ * <p><b>8. Code-level habit: reuse client instances, same rule as every
+ * other module.</b> {@code ProductServiceClient}/{@code
+ * SearchServiceClient}/{@code UserEventServiceClient} are all
+ * {@code AutoCloseable}, gRPC-channel-backed clients - build ONE of each
+ * for a service's lifetime (a Spring {@code @Bean}), never per-request,
+ * same "build once, reuse everywhere" rule already stated for {@code
+ * _06_firestore}, {@code _08_vertexai}, and {@code _11_spanner}'s clients -
+ * this module's separate {@code main()}-per-CLI-invocation demos each
+ * construct their own client because each run IS the whole process
+ * lifetime, which is the right shape for a one-shot demo and the wrong
+ * shape for a long-running service.
  */
 package com.ashfaq.gcplab._09_ai_commerce_search;
