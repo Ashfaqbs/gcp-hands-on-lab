@@ -19,7 +19,7 @@
  *
  * <h2>Human identity vs. service account</h2>
  * <table border="1">
- *   <tr><th></th><th>Human (e.g. ash001x@gmail.com)</th><th>Service account (e.g. backend-dev-sa)</th></tr>
+ *   <tr><th></th><th>Human (e.g. YOUR_GOOGLE_ACCOUNT@gmail.com)</th><th>Service account (e.g. backend-dev-sa)</th></tr>
  *   <tr><td>Represents</td><td>An actual person</td><td>A non-human "robot" identity</td></tr>
  *   <tr><td>Used for</td><td>Console clicks, gcloud CLI, personal debugging</td><td>Apps, CI/CD, servers - no human present</td></tr>
  *   <tr><td>Auth</td><td>Interactive OAuth browser login</td><td>Key file, impersonation, or attached identity - see below</td></tr>

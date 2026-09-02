@@ -21,7 +21,7 @@ gcloud init
 
 This walks through:
 - `gcloud auth login` — opens a browser, sign in as the Google account that
-  owns the project (here: `ash001x@gmail.com`).
+  owns the project (here: `YOUR_GOOGLE_ACCOUNT@gmail.com`).
 - **Pick cloud project** — select the project this repo targets:
   `project-3d2fd1eb-6dd8-40b6-958` ("My First Project").
 
@@ -74,6 +74,6 @@ own notes will call this out.
 
 ```
 gcloud config get-value project        # should print project-3d2fd1eb-6dd8-40b6-958
-gcloud auth list                       # should show ash001x@gmail.com as ACTIVE
+gcloud auth list                       # should show YOUR_GOOGLE_ACCOUNT@gmail.com as ACTIVE
 gcloud services list --enabled --filter="name:iam.googleapis.com"
 ```

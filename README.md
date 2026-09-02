@@ -11,6 +11,32 @@ along the way (SDK quirks, auth dead ends, naming/branding changes) and how
 they were actually resolved, plus a **Cost** section per module explaining
 what's metered, a formula, and where to check current pricing.
 
+This is a personal learning log, published as a reference for anyone else
+learning the same services - not an actively-maintained library or a
+production template. It's not accepting external PRs, but issues/questions
+are welcome. Licensed under [MIT](LICENSE) - copy, fork, and reuse any of it
+freely.
+
+## Prerequisites
+
+- **Java 17**, **Maven** (or use the bundled `./mvnw` wrapper - no separate
+  Maven install needed).
+- **Google Cloud CLI** (`gcloud`) installed and authenticated - see
+  [`docs/local-setup.md`](docs/local-setup.md) for the full one-time setup
+  (`gcloud init`, Application Default Credentials).
+- **A GCP project with billing enabled.** Most modules stay at $0 (Always
+  Free tier or same-session teardown); a few (Cloud SQL, Redis, Spanner) have
+  real, if small, per-hour cost while their resources exist - each module's
+  `package-info.java` **Cost** section says exactly what's billed before you
+  create anything.
+- **Not a copy-paste-and-run template as-is:** every demo class hardcodes
+  this repo's own GCP project ID (`project-3d2fd1eb-6dd8-40b6-958`) as a Java
+  constant, e.g. `PROJECT_ID = "project-3d2fd1eb-6dd8-40b6-958"`. To run this
+  against your own project, replace that string everywhere first:
+  `grep -rl "project-3d2fd1eb-6dd8-40b6-958" src | xargs sed -i "s/project-3d2fd1eb-6dd8-40b6-958/YOUR_PROJECT_ID/g"`
+  (also appears in a couple of `docs/*.md` files, safe to leave those or
+  update the same way).
+
 ## Modules
 
 | # | Package | Service | What it covers |
