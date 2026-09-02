@@ -252,6 +252,63 @@
  * {@link EmployeeCrudDemo} exists purely to make the OLTP-vs-OLAP contrast
  * concrete.
  *
+ * <h2>Filter/map/transform, and does it persist itself? (TransformAndPersistDemo)</h2>
+ * A direct, common question coming from a stream-processing background
+ * (Flink, per this repo's own {@code ~/.claude/rules/infra.md}): can
+ * BigQuery filter and map data the way a Flink job would, and does the
+ * transformed result get stored automatically? Yes to filter/map (both are
+ * plain SQL - {@code WHERE} is a filter, computed {@code SELECT}
+ * expressions are a map, exactly what {@code ProductAnalyticsDemo}'s
+ * {@code GROUP BY} query already demonstrated for aggregation); NO to
+ * automatic persistence - a bare {@code SELECT}'s result is NOT saved
+ * anywhere durable, it's returned to the caller (or briefly cached, ~24h,
+ * keyed to the exact query text) and then gone. {@link
+ * TransformAndPersistDemo} proves both halves with a real run rather than
+ * asserting it: {@code CREATE TABLE ... AS SELECT} (CTAS) wraps a FILTER
+ * ({@code WHERE category = 'Apparel'}) and a MAP (a computed tax-inclusive
+ * price column, an uppercased brand column) into one statement whose
+ * result becomes a genuinely new, separate, permanent table - proven by
+ * running a SEPARATE, LATER query against just that new table (not the
+ * original CTAS job's own output) and getting a real, independently-
+ * verified answer back (200 Apparel rows, matching a plain Java stream
+ * filter over the same in-memory catalog computed BEFORE the CTAS ran).
+ * <p>
+ * The deeper point this proves architecturally: BigQuery has NO notion of
+ * "the output of my last query" as a first-class thing the way a REPL or a
+ * Flink job's downstream operator does - every persistence boundary is
+ * explicit, either a full {@code CREATE TABLE ... AS SELECT} /
+ * {@code INSERT INTO ... SELECT} (a one-time, job-triggered materialization
+ * - what this demo does), a MATERIALIZED VIEW (the closest BigQuery
+ * equivalent to "define the transform once and keep it kept up to date" -
+ * Google auto-refreshes it incrementally as the underlying table changes,
+ * not exercised in this module but the right tool for a transform that
+ * needs to stay fresh rather than be recomputed by hand), or a SCHEDULED
+ * QUERY (the same CTAS/INSERT pattern this demo used, run automatically on
+ * a cron-like schedule - the standard BigQuery-native alternative to
+ * "write a small ETL job" for periodic batch transforms).
+ * <p>
+ * <b>How this actually compares to Flink, concretely:</b>
+ * <table border="1">
+ *   <tr><th></th><th>Flink</th><th>BigQuery</th></tr>
+ *   <tr><td>Input</td><td>an unbounded LIVE stream (Kafka/Pub-Sub)</td><td>data already sitting at rest in a table</td></tr>
+ *   <tr><td>When a transform runs</td><td>continuously, event-by-event or micro-batch</td><td>once per query/job, or on a schedule (Scheduled Queries)</td></tr>
+ *   <tr><td>Typical latency</td><td>milliseconds to low seconds</td><td>seconds or more per job, even on tiny data (see this module's own per-job overhead note in Production practices)</td></tr>
+ *   <tr><td>What "storage" means</td><td>keyed operator STATE, checkpointed for fault-tolerance - not a queryable dataset by itself</td><td>the table itself - genuinely durable, columnar, directly queryable by anyone with access</td></tr>
+ *   <tr><td>Where results go</td><td>a SINK the job writes to (a topic, a DB, a file) - Flink itself isn't where you go query the result later</td><td>the target table IS where you query the result later, if you persisted it (this section) - or nowhere, if you didn't (a bare SELECT)</td></tr>
+ * </table>
+ * The practical takeaway for a search team using both: they are not
+ * competing tools solving the same problem at different scales - Flink is
+ * the right place for continuous, low-latency filter/map/enrichment on a
+ * LIVE event stream (e.g. real-time UserEvent enrichment before it lands
+ * anywhere, see {@code _09_ai_commerce_search}'s Production practices
+ * UserEvents section), and BigQuery is the right place for that same data
+ * to land DURABLY once Flink is done with it, so it can be queried,
+ * joined, and aggregated across historical volume later - the standard
+ * real-world architecture is Flink (or Dataflow, GCP's managed Flink/Beam
+ * runner) reading from Pub/Sub, transforming in-flight, and writing its
+ * sink output directly into a BigQuery table (via the Storage Write API),
+ * not a choice between the two for the same job.
+ *
  * <h2>Production practices - what this demo skips that real work needs</h2>
  *
  * <p><b>1. DML is not a replacement for a real OLTP database - the central
@@ -384,16 +441,27 @@
  *       REST: {@code numBytes: 59121} (~58 KB, 703 rows) - real evidence of
  *       how far inside the free tier this entire module's data footprint
  *       sits.</li>
+ *   <li>{@link TransformAndPersistDemo} then ran the filter+map+persist
+ *       proof: a CTAS filtering to Apparel-only and adding a computed
+ *       tax-inclusive price plus an uppercased brand column, verified
+ *       against an independent Java-side {@code Stream.filter(...).count()}
+ *       over the same in-memory catalog (200 Apparel products both sides,
+ *       printed {@code VERIFIED}), then confirmed durable via a SEPARATE
+ *       follow-up query against the new {@code apparel_with_tax} table
+ *       alone. REST confirmed both {@code products} and
+ *       {@code apparel_with_tax} existed as genuinely separate tables
+ *       side by side before teardown.</li>
  *   <li>Torn down via a single {@code DELETE .../datasets/learning_bq
  *       ?deleteContents=true} REST call (removes the dataset and every
- *       table inside it - {@code employees} and {@code products} both - in
- *       one step, HTTP 204 confirmed) rather than dropping each table
- *       individually. Confirmed via REST ({@code GET .../datasets}
- *       returning an empty list, no {@code datasets} field at all) that
- *       zero datasets remain. Unlike every other paid module in this repo,
- *       there was no time-pressure teardown here - an idle BigQuery dataset
- *       costs nothing beyond its (free-tier-covered) storage, so this
- *       cleanup was pure tidiness, not cost-avoidance.</li>
+ *       table inside it - {@code employees}, {@code products}, and
+ *       {@code apparel_with_tax} all - in one step, HTTP 204 confirmed)
+ *       rather than dropping each table individually. Confirmed via REST
+ *       ({@code GET .../datasets} returning an empty list, no
+ *       {@code datasets} field at all) that zero datasets remain. Unlike
+ *       every other paid module in this repo, there was no time-pressure
+ *       teardown here - an idle BigQuery dataset costs nothing beyond its
+ *       (free-tier-covered) storage, so this cleanup was pure tidiness, not
+ *       cost-avoidance.</li>
  * </ul>
  */
 package com.ashfaq.gcplab._12_bigquery;
