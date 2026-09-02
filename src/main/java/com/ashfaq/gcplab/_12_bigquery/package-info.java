@@ -199,10 +199,64 @@
  *       doing so, purely tidiness, since nothing bills while idle.</li>
  * </ol>
  *
+ * <h2>Real data: take, massage, persist, verify (ProductAnalyticsDemo)</h2>
+ * {@link EmployeeCrudDemo} proves the SQL surface works on one row -
+ * {@link ProductAnalyticsDemo} is the module's actual realistic BigQuery
+ * workload, end to end, using real data instead of one fabricated row:
+ * <pre>
+ * 1. TAKE:    reuse the exact same 703-product synthetic catalog
+ *             ({@code com.ashfaq.gcplab._09_ai_commerce_search.ProductCatalogGenerator})
+ *             that {@code _09} and
+ *             {@code _10} already reuse for apples-to-apples comparisons -
+ *             same source of truth, no new fixture invented for this module.
+ * 2. MASSAGE: flatten each retail-API {@code Product} proto (nested
+ *             categories/brands lists, a custom-attributes map) into a flat
+ *             row shape (id/title/category/brand/price/attribute_key/
+ *             attribute_value) - the same extraction logic
+ *             {@code _09}'s CatalogExportDemo already established, reused
+ *             here rather than reinvented.
+ * 3. PERSIST: a real bulk LOAD JOB via {@code BigQuery.writer(...)} -
+ *             streams newline-delimited JSON directly into a load job with
+ *             zero GCS staging file needed - NOT 703 individual DML INSERT
+ *             statements (which Production practices #1 below explains is
+ *             both slow and a real quota risk).
+ * 4. VERIFY:  BEFORE ever touching BigQuery, plain Java independently
+ *             computes two facts about the in-memory product list: the
+ *             exact row count, and which product has the single highest
+ *             price. AFTER the load, the same two facts are re-derived via
+ *             real SQL against BigQuery ({@code SELECT COUNT(*)}, and
+ *             {@code ORDER BY price DESC LIMIT 1}) and compared line-by-line
+ *             against Java's independently-computed answer, printing an
+ *             explicit VERIFIED/MISMATCH per check - not "the demo ran
+ *             without an exception," an actual assertion that the
+ *             persisted data and the query engine agree with what the
+ *             source data actually contains.
+ * </pre>
+ * A real run against this catalog: {@code VERIFIED: row count - expected
+ * 703, BigQuery reports 703} and {@code VERIFIED: highest-priced product -
+ * expected p602 at 1233.0, BigQuery reports p602 at 1233.0} - both checks
+ * passed, confirmed by the demo's own exit behavior (it throws if either
+ * mismatches, rather than printing a mismatch and continuing as if nothing
+ * happened). The table's reported size after loading all 703 rows:
+ * {@code numBytes: 59121} (~58 KB) - confirming by direct measurement, not
+ * assumption, how enormously this module's entire real workload sits inside
+ * the 1 TiB/10 GiB free tier described in the Cost section above.
+ * <p>
+ * The actual payoff query - the reason this data belongs in a warehouse at
+ * all, not achievable by looking at any single row - is the {@code GROUP BY
+ * category} aggregation: average price and product count per category
+ * across all 703 products in one query, the kind of "massage" analytical
+ * question ({@code _09}'s Production practices section flags exactly this -
+ * search-query logs and click/conversion analysis at aggregate scale) that
+ * is BigQuery's actual reason for existing, versus the row-level CRUD
+ * {@link EmployeeCrudDemo} exists purely to make the OLTP-vs-OLAP contrast
+ * concrete.
+ *
  * <h2>Production practices - what this demo skips that real work needs</h2>
  *
  * <p><b>1. DML is not a replacement for a real OLTP database - the central
- * lesson of this module's own {@link EmployeeCrudDemo}.</b> It proved
+ * lesson of this module's own {@link EmployeeCrudDemo}, and exactly why
+ * {@link ProductAnalyticsDemo} loads via a bulk JOB instead.</b> It proved
  * UPDATE/DELETE work, deliberately, specifically to make this point
  * concrete: each DML statement here is a full query JOB (real job-
  * submission latency, real per-job overhead, no row-level locking the way
@@ -319,14 +373,27 @@
  *       {@code numBytes} reported {@code "0"} mid-module (BigQuery rounds
  *       very small tables down), confirming the whole exercise stayed
  *       enormously inside the 1 TiB query / 10 GiB storage free tier.</li>
- *   <li>Torn down via {@link SchemaDemo}'s {@code drop} mode ({@code DROP
- *       TABLE} then {@code DROP SCHEMA}, both DDL query jobs) - confirmed
- *       via REST ({@code GET .../datasets} returning an empty list, no
- *       {@code datasets} field at all) that zero datasets remain. Unlike
- *       every other paid module in this repo, there was no time-pressure
- *       teardown here - an idle BigQuery dataset costs nothing beyond its
- *       (free-tier-covered) storage, so this cleanup was pure tidiness, not
- *       cost-avoidance.</li>
+ *   <li>{@link ProductAnalyticsDemo} then ran the real bulk-data pattern:
+ *       generated the same 703-product catalog {@code _09}/{@code _10}
+ *       reuse, computed expected row-count and max-price facts in plain
+ *       Java, bulk-loaded all 703 as NDJSON via a real load job (no GCS
+ *       staging), then re-derived both facts via SQL against BigQuery and
+ *       compared - both checks printed {@code VERIFIED}, confirmed by the
+ *       demo's own exit behavior (throws on any mismatch rather than
+ *       printing and continuing). Table size after load confirmed via
+ *       REST: {@code numBytes: 59121} (~58 KB, 703 rows) - real evidence of
+ *       how far inside the free tier this entire module's data footprint
+ *       sits.</li>
+ *   <li>Torn down via a single {@code DELETE .../datasets/learning_bq
+ *       ?deleteContents=true} REST call (removes the dataset and every
+ *       table inside it - {@code employees} and {@code products} both - in
+ *       one step, HTTP 204 confirmed) rather than dropping each table
+ *       individually. Confirmed via REST ({@code GET .../datasets}
+ *       returning an empty list, no {@code datasets} field at all) that
+ *       zero datasets remain. Unlike every other paid module in this repo,
+ *       there was no time-pressure teardown here - an idle BigQuery dataset
+ *       costs nothing beyond its (free-tier-covered) storage, so this
+ *       cleanup was pure tidiness, not cost-avoidance.</li>
  * </ul>
  */
 package com.ashfaq.gcplab._12_bigquery;

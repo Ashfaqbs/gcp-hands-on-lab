@@ -42,62 +42,114 @@
 		</dependencies>
 	</dependencyManagement>
 	<dependencies>
+		<!-- GCP CLIENT LIBRARIES - each mapped below to the module(s) that
+		     actually import it. Versions come from the libraries-bom import
+		     above (no <version> needed here) unless noted otherwise. -->
+
+		<!-- _01_iam (IamRoleVerifier's getIamPolicy/setIamPolicy) and
+		     _02_identities_bindings (IamBindingDemo, IamPermissionTestDemo) -
+		     Resource Manager API: project-level IAM POLICY BINDINGS. NOT the
+		     same as google-api-services-iam below (that's roles/service
+		     accounts - a different API/resource, see _01_iam's package-info
+		     "Two distinct steps" section). -->
 		<dependency>
 			<groupId>com.google.cloud</groupId>
 			<artifactId>google-cloud-resourcemanager</artifactId>
 		</dependency>
+		<!-- _03_storage (BucketDemo, ObjectDemo) -->
 		<dependency>
 			<groupId>com.google.cloud</groupId>
 			<artifactId>google-cloud-storage</artifactId>
 		</dependency>
+		<!-- _09_ai_commerce_search (CatalogImportDemo, SearchQualityTest,
+		     CatalogPurgeDemo, CatalogExportDemo) -->
 		<dependency>
 			<groupId>com.google.cloud</groupId>
 			<artifactId>google-cloud-retail</artifactId>
 		</dependency>
+		<!-- _06_firestore (EmployeeDocCrudDemo) -->
 		<dependency>
 			<groupId>com.google.cloud</groupId>
 			<artifactId>google-cloud-firestore</artifactId>
 		</dependency>
+		<!-- _11_spanner (SchemaDemo, EmployeeCrudDemo) -->
 		<dependency>
 			<groupId>com.google.cloud</groupId>
 			<artifactId>google-cloud-spanner</artifactId>
 		</dependency>
+		<!-- _12_bigquery (SchemaDemo, EmployeeCrudDemo, ProductAnalyticsDemo) -->
 		<dependency>
 			<groupId>com.google.cloud</groupId>
 			<artifactId>google-cloud-bigquery</artifactId>
 		</dependency>
+		<!-- _08_vertexai (GeminiPromptDemo, SimpleRagDemo, SimpleAgentDemo) -
+		     the modern unified Gemini SDK, NOT covered by libraries-bom,
+		     hence the explicit <version> pin. -->
 		<dependency>
 			<groupId>com.google.genai</groupId>
 			<artifactId>google-genai</artifactId>
 			<version>1.57.0</version>
 		</dependency>
+		<!-- _04_cloudsql (EmployeeCrudDemo, TableDemo) - plain JDBC driver;
+		     the Cloud SQL Java Connector below wraps this, doesn't replace it -->
 		<dependency>
 			<groupId>org.postgresql</groupId>
 			<artifactId>postgresql</artifactId>
 		</dependency>
+		<!-- _05_redis (CacheCrudDemo) - direct Redis client, not GCP-specific;
+		     Memorystore just speaks the real Redis wire protocol, see
+		     _05_redis's package-info -->
 		<dependency>
 			<groupId>redis.clients</groupId>
 			<artifactId>jedis</artifactId>
 			<version>5.2.0</version>
 		</dependency>
+		<!-- _04_cloudsql (CloudSqlConnection) - the Cloud SQL Java Connector,
+		     wraps the postgresql driver above with IAM-authenticated,
+		     encrypted connections instead of a raw JDBC URL/public IP -->
 		<dependency>
 			<groupId>com.google.cloud.sql</groupId>
 			<artifactId>postgres-socket-factory</artifactId>
 			<version>1.21.1</version>
 		</dependency>
+		<!-- _01_iam (IamRoleLifecycleDemo, IamRoleVerifier, UpdateRoleDemo) and
+		     _02_identities_bindings (ServiceAccountDemo) - the IAM Admin API
+		     (custom roles + service accounts), a Discovery-based client, NOT
+		     covered by libraries-bom, hence the explicit <version> pin - see
+		     google-cloud-resourcemanager above for the DIFFERENT API these two
+		     modules also both use, for policy bindings specifically. -->
 		<dependency>
 			<groupId>com.google.apis</groupId>
 			<artifactId>google-api-services-iam</artifactId>
 			<version>v1-rev20250516-2.0.0</version>
 		</dependency>
+		<!-- Transitive support library for google-api-services-iam above (the
+		     HTTP transport/JSON factory every Discovery-based Google API
+		     client needs) - same _01_iam/_02_identities_bindings classes,
+		     never imported directly by any module on its own. -->
 		<dependency>
 			<groupId>com.google.api-client</groupId>
 			<artifactId>google-api-client</artifactId>
 		</dependency>
+		<!-- Used by EVERY module, not one in particular - GoogleCredentials /
+		     ImpersonatedCredentials (see docs/auth-approach.md), the auth
+		     pattern every single demo class in this repo authenticates with. -->
 		<dependency>
 			<groupId>com.google.auth</groupId>
 			<artifactId>google-auth-library-oauth2-http</artifactId>
 		</dependency>
+
+		<!-- SPRING BOOT STARTERS - Spring Initializr scaffold, kept from the
+		     original project generation. NOT used by any module - every
+		     _NN_ package is a plain main()-per-class CLI demo run via
+		     `mvn exec:java`, never through the Spring app context
+		     (GcpLearningLabApplication.java exists but nothing in this repo
+		     needs Spring MVC/JPA/Mongo/Redis/validation/actuator/Lombok -
+		     grep the codebase: zero @RestController, @Entity, @Valid, or
+		     lombok.* usages anywhere). Left in rather than removed since
+		     Spring Boot generated the project with them and no module has
+		     needed them removed - candidates to prune if this repo's scope
+		     stays "CLI demos only." -->
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-actuator</artifactId>
@@ -123,6 +175,9 @@
 			<artifactId>spring-boot-starter-webmvc</artifactId>
 		</dependency>
 
+		<!-- Also unused (same "scaffold, not exercised by any module" note as
+		     the Spring starters above) - zero lombok.* annotations anywhere
+		     in src/main/java. -->
 		<dependency>
 			<groupId>org.projectlombok</groupId>
 			<artifactId>lombok</artifactId>

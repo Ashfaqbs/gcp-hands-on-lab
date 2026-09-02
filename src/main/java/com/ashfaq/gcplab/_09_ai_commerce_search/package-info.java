@@ -98,6 +98,60 @@
  *       ("Product Catalog") exists, empty (no products imported yet).</li>
  * </ul>
  *
+ * <h2>How this differs from setting up a database yourself (a common point
+ * of confusion coming from Cloud SQL/Firestore/BigQuery)</h2>
+ * There is NO "create a database/collection" step anywhere in this module,
+ * and that's not an omission - it genuinely doesn't exist for this product.
+ * The three "Steps" above are the entire setup: "Turn on API" is the only
+ * action that creates anything, and what it creates
+ * ({@code default_catalog}, confirmed empty via the REST check above) is
+ * provisioned automatically as a side effect of enabling the API, not a
+ * separate resource-creation step the way {@code _06_firestore}'s "pick
+ * Native vs. MongoDB-compatibility mode" or {@code _12_bigquery}'s
+ * "CREATE SCHEMA" are. From that point on, the ENTIRE flow - both inserting
+ * data and querying it - is exactly two kinds of API call, nothing else:
+ * <pre>
+ * INSERT path:  CatalogImportDemo -&gt; ImportProducts (or single
+ *               CreateProduct/UpdateProduct calls) -&gt; done. No schema to
+ *               declare up front the way SQL DDL or even Firestore's
+ *               (optional, auto-inferred) field types require - a
+ *               Product's shape is fixed by the API's own proto definition
+ *               (title, description, categories, priceInfo, custom
+ *               attributes), not something you design per-project.
+ * QUERY path:   SearchQualityTest -&gt; Search -&gt; done. No index to build,
+ *               no query language to learn beyond the SearchRequest's own
+ *               fields (query text, filter, facetSpecs - see the Quick
+ *               reference section above) - Google's own infrastructure
+ *               handles retrieval and ranking entirely server-side.
+ * </pre>
+ * So yes - the flow really is "enable the API once, then insert = one kind
+ * of call, search = a different kind of call," with none of the
+ * provision-a-database ceremony every other data module in this repo
+ * needed. This is the direct trade this product makes for being a
+ * purpose-built retail product rather than a general-purpose database (see
+ * "What this service actually is" above): far less setup, in exchange for
+ * a fixed, retail-shaped data model you don't get to redesign.
+ * <p>
+ * <b>Is Search literally a "similarity search on the input"?</b> Partially,
+ * and this exact nuance is what this module's own 100-query audit measured
+ * rather than assumed. Internally, yes, there IS a ranking/similarity model
+ * involved (the {@code modelScores} field discussed above is evidence a
+ * scoring model runs) - but "similarity search" usually implies EMBEDDING-
+ * based semantic matching (the way {@code _08_vertexai}'s {@code
+ * SimpleRagDemo} does cosine-similarity over embedding vectors), and this
+ * module's own audit found the DEFAULT configuration behaves much more like
+ * literal keyword/token matching than true semantic similarity - it
+ * returned zero results for "i need something for my dandruff" despite the
+ * word "dandruff" appearing verbatim in a product's title. True semantic/
+ * embedding-based retrieval is a real, OPT-IN capability of this product
+ * (its own "search-quality tuning" and semantic-retrieval features,
+ * separate from the always-on default), not something switched on simply
+ * by calling the Search API - calling the SDK gets you Google's ranking
+ * pipeline, but "how semantic that ranking actually is" depends on
+ * configuration this module deliberately left at its out-of-the-box
+ * defaults specifically to measure that gap honestly. See "Internal
+ * architecture" above for the full retrieval-vs-ranking breakdown.
+ *
  * <h2>Catalog import: 703 synthetic products (2026-08-31)</h2>
  * {@link ProductCatalogGenerator} builds a realistic local-supermarket
  * catalog (fictional brands, no real retailer named) - groceries, dairy,
