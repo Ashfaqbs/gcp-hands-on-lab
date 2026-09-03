@@ -118,5 +118,157 @@
  * high write-throughput across storage cells) is the single biggest lever
  * over GCS performance/cost at scale, since there is no schema or index to
  * tune the way there is in a database - the key namespace IS the index.
+ *
+ * <h2>When to use each piece of this module</h2>
+ * Use {@link BucketDemo}'s admin operations (create/configure/delete a
+ * bucket) rarely and deliberately - bucket creation is an infra/platform
+ * action (see the IAM split below), not something application code does at
+ * runtime. Use {@link ObjectDemo}'s direct upload/download when the DATA
+ * genuinely needs to pass through your backend (validation, transformation,
+ * access-control logic beyond "can read this bucket at all"). Use
+ * {@link SignedUrlDemo}'s pattern instead whenever a CLIENT (browser,
+ * mobile app, another service with no GCP credentials of its own) needs to
+ * upload or download a specific object directly - proxying file bytes
+ * through your backend just to relay them to/from GCS wastes your backend's
+ * bandwidth and compute for zero benefit once access control has already
+ * been decided.
+ *
+ * <h2>Sample usage walkthrough - each demo class, what it proves</h2>
+ * <b>{@link BucketDemo} - admin operations, run as YOUR OWN credentials
+ * (see Quick reference for why):</b>
+ * <pre>
+ * Storage storage = StorageOptions.newBuilder().setProjectId(PROJECT_ID).build().getService();
+ *
+ * BucketInfo bucketInfo = BucketInfo.newBuilder(BUCKET_NAME)
+ *     .setLocation("US-CENTRAL1")                         // Always Free tier region
+ *     .setStorageClass(StorageClass.STANDARD)
+ *     .setIamConfiguration(BucketInfo.IamConfiguration.newBuilder()
+ *         .setIsUniformBucketLevelAccessEnabled(true)      // IAM-only access, no per-object ACLs
+ *         .build())
+ *     .build();
+ * Bucket bucket = storage.create(bucketInfo);
+ * </pre>
+ * <b>{@link ObjectDemo} - object CRUD, IMPERSONATING backend-dev-sa (proving
+ * the storage.objects.* grant works for real data operations):</b>
+ * <pre>
+ * Blob blob = storage.create(
+ *     BlobInfo.newBuilder(BlobId.of(BUCKET_NAME, "hello.txt")).setContentType("text/plain").build(),
+ *     content.getBytes(StandardCharsets.UTF_8));
+ *
+ * Blob downloaded = storage.get(BlobId.of(BUCKET_NAME, "hello.txt"));
+ * String content = new String(downloaded.getContent(), StandardCharsets.UTF_8);
+ * </pre>
+ * <b>{@link SignedUrlDemo} - the pattern real client apps actually use,
+ * proven with a real round trip, no GCP credentials on the "client" side:</b>
+ * <pre>
+ * URI signedUploadUrl = storage.signUrl(blobInfo, 10, TimeUnit.MINUTES,
+ *     Storage.SignUrlOption.httpMethod(HttpMethod.PUT),
+ *     Storage.SignUrlOption.withV4Signature(),
+ *     Storage.SignUrlOption.withContentType()).toURI();
+ *
+ * // handed to a client with ZERO GCP credentials - a plain PUT is enough
+ * HttpClient.newHttpClient().send(
+ *     HttpRequest.newBuilder(signedUploadUrl)
+ *         .header("Content-Type", "text/plain")
+ *         .PUT(HttpRequest.BodyPublishers.ofString(content))
+ *         .build(),
+ *     HttpResponse.BodyHandlers.ofString());
+ * </pre>
+ * Verified live: a signed PUT URL generated via impersonated credentials
+ * (no downloaded JSON key anywhere) accepted a plain, credential-free HTTP
+ * PUT with HTTP 200, and a signed GET URL for the same object returned the
+ * exact uploaded content back byte-for-byte on a separate request. Signing
+ * itself never touches a local private key - {@code Storage.signUrl(...)}
+ * detects the credential is {@code ImpersonatedCredentials} and transparently
+ * calls the IAM Credentials API's {@code signBlob} RPC instead, the same
+ * "no exportable secret" property every impersonation-based demo in this
+ * repo relies on.
+ *
+ * <h2>Quick reference</h2>
+ * <p><b>Auth pattern used here, and why it splits across two identities.</b>
+ * {@code BucketDemo} runs as your own ADC user (bucket admin is
+ * intentionally NOT in backendDeveloper's permission set - see "Ties back to
+ * _01_iam / _02_identities_bindings" above). {@code ObjectDemo} and
+ * {@code SignedUrlDemo} both impersonate backend-dev-sa, because both are
+ * proving the APPLICATION identity's object-level access, not your own.
+ *
+ * <p><b>Important classes/methods to know:</b>
+ * <ul>
+ *   <li>{@code StorageOptions.getDefaultInstance()}/{@code newBuilder()} -
+ *       the client builder; {@code Storage} itself is the single entry
+ *       point for every bucket AND object operation - unlike
+ *       {@code _09_ai_commerce_search}'s split of
+ *       {@code ProductServiceClient}/{@code SearchServiceClient}, GCS has
+ *       one client class for everything.</li>
+ *   <li>{@code BlobId} vs. {@code BlobInfo} - {@code BlobId} is just the
+ *       (bucket, key, generation) address; {@code BlobInfo} is the address
+ *       PLUS metadata (content type, custom metadata, storage class
+ *       override). Methods that only need to locate an object take
+ *       {@code BlobId}; methods that create/update one take
+ *       {@code BlobInfo}.</li>
+ *   <li>{@code Storage.signUrl(BlobInfo, duration, TimeUnit, SignUrlOption...)} -
+ *       the signed-URL entry point; {@code SignUrlOption.withV4Signature()}
+ *       should always be passed explicitly (V4 is current; the default
+ *       signing version without it is the older, discouraged V2 scheme).</li>
+ *   <li>{@code Bucket.IamConfiguration.setIsUniformBucketLevelAccessEnabled(true)} -
+ *       the setting that makes every access decision go through IAM alone
+ *       (see Internal architecture above) - the default this module always
+ *       sets explicitly rather than relying on GCS's own default.</li>
+ * </ul>
+ *
+ * <p><b>Common errors and what they actually mean:</b>
+ * <ul>
+ *   <li>{@code 403 Forbidden} on a signed URL that LOOKS correctly formed -
+ *       almost always signed with the wrong HTTP method, wrong
+ *       content-type (a PUT signed for {@code text/plain} rejects a client
+ *       sending {@code application/json}), or already expired - signed URL
+ *       validation is strict about matching exactly what was signed, not
+ *       just "is this request generally authorized."</li>
+ *   <li>{@code PERMISSION_DENIED} calling {@code signUrl} itself (not the
+ *       resulting URL - the SIGNING call) - the impersonation chain needs
+ *       {@code roles/iam.serviceAccountTokenCreator} on the target SA
+ *       (same grant every impersonation demo in this repo depends on,
+ *       already set up in {@code _02_identities_bindings}) since signing
+ *       via {@code ImpersonatedCredentials} routes through the IAM
+ *       Credentials API's {@code signBlob}, bundled in that same
+ *       predefined role.</li>
+ *   <li>{@code 409 Conflict} on bucket create - bucket names are GLOBALLY
+ *       unique across every GCP project on Earth, not just yours; a
+ *       collision with someone else's bucket name is a real, if rare,
+ *       possibility, which is why this module prefixes the bucket name with
+ *       the full project ID.</li>
+ * </ul>
+ *
+ * <h2>Production practices - what this demo skips that real work needs</h2>
+ * <p><b>1. Signed URLs need a short expiry and a narrow scope, always.</b>
+ * This module's 10-minute expiry is reasonable for a one-off client
+ * upload/download flow - never generate a signed URL with a long expiry
+ * "to be safe," since anyone who obtains the URL (a leaked log line, a
+ * browser history entry, a referrer header) can use it for its full
+ * validity window with no further authentication at all. Scope each URL to
+ * exactly the object and HTTP method needed - never a bucket-wide signed
+ * URL when a client only needs one file.
+ * <p><b>2. Lifecycle rules for anything that isn't meant to live forever.</b>
+ * Not exercised in this module's short-lived demo objects, but a real
+ * bucket holding uploads (user avatars, temporary exports, staged imports)
+ * should have an Object Lifecycle Management rule (auto-delete after N
+ * days, or auto-transition to a colder/cheaper storage class) configured on
+ * the bucket - the durable, no-code alternative to a cron job that lists
+ * and deletes old objects by hand.
+ * <p><b>3. CORS configuration for browser-originated signed-URL uploads.</b>
+ * A signed URL called from a browser's JavaScript (rather than this
+ * module's server-side {@code HttpClient} proof) needs the bucket's CORS
+ * configuration to explicitly allow the calling origin and the PUT/GET
+ * method - otherwise the browser blocks the response even though the
+ * signed URL itself is valid and the server-side request would have
+ * succeeded. A common first-time confusion: the request appears to work in
+ * a raw {@code curl} test (this module's proof) but fails silently in an
+ * actual browser until CORS is configured.
+ * <p><b>4. Object versioning for anything where accidental overwrite/delete
+ * is a real risk.</b> Enabling Object Versioning on a bucket keeps prior
+ * versions of an object recoverable after an overwrite or delete - not
+ * needed for this module's disposable demo objects, but the right default
+ * for any bucket holding data that would be genuinely costly to lose to a
+ * bug or a mistaken signed-URL grant.
  */
 package com.ashfaq.gcplab._03_storage;

@@ -132,5 +132,175 @@
  * that expects unbounded write throughput on one Cloud SQL instance will
  * eventually hit a real ceiling that only sharding (an application-level
  * concern Cloud SQL doesn't automate) can push past.
+ *
+ * <h2>When to use each piece of this module</h2>
+ * Reach for Cloud SQL, generally, when the workload is transactional
+ * (orders, accounts, inventory - anything needing real ACID guarantees and
+ * joins) and fits comfortably on one machine's write throughput - see
+ * {@code _11_spanner}'s RDBMS-flow comparison table for exactly where that
+ * ceiling is and what to reach for past it. Within this module:
+ * {@link CloudSqlConnection}/{@link EmployeeCrudDemo}/{@link TableDemo}'s
+ * per-call-connection pattern is fine for a one-shot script or a batch job
+ * that runs, does its work, and exits - it is the WRONG pattern for a
+ * long-running service; {@link PooledConnectionDemo} is the pattern an
+ * actual Spring Boot service should use (and is exactly what
+ * {@code spring-boot-starter-data-jpa}'s auto-configured
+ * {@code HikariDataSource} does automatically if that starter's JPA/
+ * DataSource support were wired up in this project - see
+ * {@code pom.xml}'s note that starter is currently unused scaffold).
+ *
+ * <h2>Sample usage walkthrough - each demo class, what it proves</h2>
+ * <b>{@link CloudSqlConnection} - the shared connector setup every other
+ * class in this package builds on:</b>
+ * <pre>
+ * Properties props = new Properties();
+ * props.setProperty("user", "postgres");
+ * props.setProperty("password", System.getenv("DB_PASSWORD"));   // never hardcoded
+ * props.setProperty("socketFactory", "com.google.cloud.sql.postgres.SocketFactory");
+ * props.setProperty("cloudSqlInstance", "PROJECT:REGION:INSTANCE");
+ *
+ * Connection conn = DriverManager.getConnection("jdbc:postgresql:///postgres", props);
+ * // the socketFactory property is what makes this an encrypted, IAM-resolved
+ * // connection instead of a raw host:port - no firewall rule, no TLS cert
+ * // management, no public IP needed on the instance at all
+ * </pre>
+ * <b>{@link EmployeeCrudDemo} - full CRUD via {@code PreparedStatement}
+ * everywhere, never string concatenation:</b>
+ * <pre>
+ * try (PreparedStatement ps = conn.prepareStatement(
+ *         "INSERT INTO employees (name, role) VALUES (?, ?) RETURNING id")) {
+ *     ps.setString(1, "Ashfaq");
+ *     ps.setString(2, "Backend Developer");
+ *     try (ResultSet rs = ps.executeQuery()) {
+ *         rs.next();
+ *         int newId = rs.getInt("id");
+ *     }
+ * }
+ * </pre>
+ * <b>{@link TableDemo} - DDL from code, alongside a UI-created table, to
+ * prove both paths produce the same result:</b>
+ * <pre>
+ * stmt.execute("""
+ *     CREATE TABLE IF NOT EXISTS projects (
+ *       id SERIAL PRIMARY KEY,
+ *       name VARCHAR(100) NOT NULL,
+ *       employee_id INTEGER REFERENCES employees(id),
+ *       created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+ *     )""");
+ * </pre>
+ * <b>{@link PooledConnectionDemo} - the production-shaped alternative,
+ * proven with real numbers, not just configured and assumed to work:</b>
+ * <pre>
+ * HikariConfig config = new HikariConfig();
+ * config.setJdbcUrl("jdbc:postgresql:///postgres");
+ * config.setDataSourceProperties(cloudSqlConnectorProps);   // same socketFactory setup
+ * config.setMaximumPoolSize(3);
+ * HikariDataSource dataSource = new HikariDataSource(config);   // built ONCE
+ *
+ * for (int i = 0; i &lt; 5; i++) {
+ *     try (Connection conn = dataSource.getConnection()) {      // BORROWED, not opened fresh
+ *         // ... run a query ...
+ *     }                                                          // returned to pool, socket stays open
+ * }
+ * </pre>
+ * Verified live against a real {@code db-g1-small} instance: 5 sequential
+ * queries through the pool logged {@code "Added connection"} exactly ONCE
+ * (HikariCP's own log line for a genuinely new physical connection) -
+ * every subsequent query reused that same connection, confirmed further by
+ * {@code HikariPoolMXBean} reporting 1 total connection opened against a
+ * configured max of 3. Contrast this with {@link CloudSqlConnection}'s
+ * pattern, which would open (and tear down) a brand-new TCP+TLS+Postgres-
+ * auth handshake for every one of those 5 calls if used in a loop instead
+ * of once per process.
+ *
+ * <h2>Quick reference</h2>
+ * <p><b>Auth pattern used here.</b> Every class in this package connects
+ * using YOUR OWN ADC identity to resolve the instance via the Cloud SQL
+ * Admin API (the socket factory's own internal call), PLUS a native
+ * Postgres username/password for the actual database login - genuinely two
+ * separate auth steps layered together, not impersonation the way
+ * {@code _03_storage}/{@code _06_firestore} use it. See "CRUD ties back to
+ * IAM - with a caveat" above for why this isn't backend-dev-sa's
+ * {@code cloudsql.instances.connect} grant actually being exercised (IAM
+ * database authentication, a different feature, would be needed for that).
+ *
+ * <p><b>Important classes/methods to know:</b>
+ * <ul>
+ *   <li>{@code DriverManager.getConnection(url, Properties)} - the plain
+ *       JDBC entry point; the {@code socketFactory}/{@code cloudSqlInstance}
+ *       properties are what route it through the Cloud SQL Connector
+ *       instead of a raw network address - remove those two properties and
+ *       this becomes an ordinary (and non-functional, since there's no
+ *       public IP/firewall rule) JDBC connection string.</li>
+ *   <li>{@code HikariConfig}/{@code HikariDataSource} - the pool
+ *       configuration object and the pool itself; {@code
+ *       setMaximumPoolSize}/{@code setMinimumIdle} are the two settings
+ *       that matter most and should be sized against real measured
+ *       concurrency, never left at a guessed default (see Production
+ *       practices below).</li>
+ *   <li>{@code HikariPoolMXBean} - live pool introspection
+ *       ({@code getActiveConnections()}/{@code getIdleConnections()}/
+ *       {@code getTotalConnections()}) - the programmatic way to answer
+ *       "is my pool actually sized correctly for real traffic," the same
+ *       numbers Spring Boot Actuator's {@code /actuator/metrics} would
+ *       expose automatically if that starter (present in {@code pom.xml}
+ *       but currently unused scaffold) were wired up.</li>
+ * </ul>
+ *
+ * <p><b>Common errors and what they actually mean:</b>
+ * <ul>
+ *   <li>{@code IllegalStateException: DB_PASSWORD environment variable is
+ *       not set} - deliberate fail-fast (see {@code security.md}'s "validate
+ *       all required secrets at startup" rule) rather than a confusing JDBC
+ *       auth failure several layers down.</li>
+ *   <li>Connection hangs for a long time, then times out - almost always
+ *       the Cloud SQL Admin API call inside the socket factory failing
+ *       silently-ish (instance doesn't exist, wrong instance-connection
+ *       name format, or the caller's ADC identity lacks
+ *       {@code cloudsql.instances.connect}) rather than the actual database
+ *       login - check the instance-connection-name string
+ *       ({@code PROJECT:REGION:INSTANCE}, colon-separated, easy to typo)
+ *       before assuming a password problem.</li>
+ *   <li>{@code HikariPool-1 - Connection is not available, request timed
+ *       out} - every pooled connection is checked out and none returned
+ *       within {@code connectionTimeout} (default 30s) - either genuine
+ *       overload (pool sized too small for real concurrency) or a leak
+ *       (code that calls {@code getConnection()} without a
+ *       try-with-resources / never closes it) - HikariCP's leak-detection
+ *       threshold ({@code setLeakDetectionThreshold(...)}, not set in this
+ *       module) logs a stack trace for exactly this case in production.</li>
+ * </ul>
+ *
+ * <h2>Production practices - what this demo skips that real work needs</h2>
+ * <p><b>1. Size the pool against measured concurrency, not a guess.</b>
+ * This module's {@code maximumPoolSize(3)} was picked arbitrarily for a
+ * five-query demo. HikariCP's own guidance formula for a real service:
+ * {@code connections = ((core_count * 2) + effective_spindle_count)} as a
+ * STARTING point, then tune against actual observed wait times - and
+ * critically, Cloud SQL itself has a hard {@code max_connections} ceiling
+ * per instance tier, shared across every service connecting to it, so a
+ * pool sized too large on one service can starve others.
+ * <p><b>2. Secret Manager instead of an environment variable for the DB
+ * password, in a real deployment.</b> {@code DB_PASSWORD} as a plain env var
+ * is acceptable for local dev (this module's context) but not for a
+ * deployed service - see {@code docs/production-readiness.md}'s Secret
+ * Manager entry for the versioned, IAM-controlled, audit-logged
+ * alternative, and consider IAM database authentication (mentioned above)
+ * to remove the password entirely for the identity that matters most.
+ * <p><b>3. One shared {@code HikariDataSource} per application, not per
+ * request or per class.</b> {@link PooledConnectionDemo} builds the pool
+ * ONCE at the top of {@code main()} and reuses it for every query - the
+ * pattern that matters is exactly this: a Spring Boot service should have
+ * exactly one {@code DataSource} bean for its whole lifetime, injected
+ * everywhere, never constructed per-request (the same "build once, reuse
+ * everywhere" rule stated for every other GCP/DB client throughout this
+ * repo, here doubly true since a pool is specifically expensive to
+ * duplicate).
+ * <p><b>4. Monitor pool exhaustion as a real alerting signal.</b>
+ * {@code HikariPoolMXBean}'s live stats (used in this module purely to
+ * prove reuse) are exactly what should feed a production dashboard -
+ * sustained {@code activeConnections} near {@code maximumPoolSize} is an
+ * early warning of exactly the kind of overload that later shows up as
+ * "connection is not available, request timed out" in production logs.
  */
 package com.ashfaq.gcplab._04_cloudsql;

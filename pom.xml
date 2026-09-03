@@ -101,11 +101,21 @@
 			<artifactId>google-genai</artifactId>
 			<version>1.57.0</version>
 		</dependency>
-		<!-- _04_cloudsql (EmployeeCrudDemo, TableDemo) - plain JDBC driver;
-		     the Cloud SQL Java Connector below wraps this, doesn't replace it -->
+		<!-- _04_cloudsql (EmployeeCrudDemo, TableDemo, PooledConnectionDemo) -
+		     plain JDBC driver; the Cloud SQL Java Connector below wraps this,
+		     doesn't replace it -->
 		<dependency>
 			<groupId>org.postgresql</groupId>
 			<artifactId>postgresql</artifactId>
+		</dependency>
+		<!-- _04_cloudsql (PooledConnectionDemo) - HikariCP, this repo's own
+		     coding-style.md/java-springboot.md rules mandate it for real
+		     connection pooling instead of DriverManager.getConnection() per
+		     call (what CloudSqlConnection.java uses, deliberately, in the
+		     other demos - see PooledConnectionDemo's own javadoc for why). -->
+		<dependency>
+			<groupId>com.zaxxer</groupId>
+			<artifactId>HikariCP</artifactId>
 		</dependency>
 		<!-- _05_redis (CacheCrudDemo) - direct Redis client, not GCP-specific;
 		     Memorystore just speaks the real Redis wire protocol, see

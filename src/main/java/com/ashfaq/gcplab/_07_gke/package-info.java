@@ -162,5 +162,149 @@
  * complexity only when something genuinely needs node-level access
  * (custom kernel modules, specific machine types/GPUs Autopilot doesn't
  * offer, DaemonSet-based infrastructure agents).
+ *
+ * <h2>When to use this service</h2>
+ * Reach for GKE when a workload is a long-running, always-on process that
+ * genuinely benefits from container orchestration - multiple replicas,
+ * rolling updates, self-healing, service discovery between multiple
+ * services. Do NOT reach for it for something that only needs to run in
+ * response to an event or a schedule (Cloud Run or Cloud Functions - both
+ * genuinely missing from this repo, see {@code docs/roadmap.md} - are a
+ * much smaller operational surface for that shape of workload, with no
+ * cluster to manage at all). Within GKE itself: default to Autopilot (this
+ * module's choice) unless a specific, named requirement needs Standard's
+ * node-level access - see the System design section above for exactly
+ * which requirements those are.
+ *
+ * <h2>Sample usage walkthrough - the YAML and kubectl commands, what each proves</h2>
+ * This module has no Java code - GKE's day-to-day surface is genuinely
+ * YAML + {@code kubectl}, not a client library, which is itself worth
+ * internalizing: unlike every other module in this repo, there is no
+ * {@code GoogleCredentials}/{@code ImpersonatedCredentials} call anywhere
+ * in this workflow (see Quick reference below for how auth actually works
+ * here instead).
+ * <pre>
+ * # 1. CONNECT kubectl to the cluster's control plane - writes connection
+ * #    info + a cert into ~/.kube/config, a ONE-TIME step per cluster
+ * gcloud container clusters get-credentials learning-gke --region us-central1
+ *
+ * # 2. APPLY the manifest - a Deployment (desired state: 1 replica of this
+ * #    image) and a Service (expose it, provision a real Load Balancer)
+ * kubectl apply -f hello-app.yaml
+ *
+ * # 3. VERIFY - never assume apply succeeding means the workload is healthy
+ * kubectl get pods                 # watch for STATUS: Running
+ * kubectl get service hello-app-service   # watch for an EXTERNAL-IP to be assigned
+ * curl http://EXTERNAL_IP/          # the actual end-to-end proof - real traffic through
+ *                                    # the LoadBalancer to the pod, not just "kubectl says it's up"
+ *
+ * # 4. TEAR DOWN - delete the Service FIRST, so its LoadBalancer/forwarding
+ * #    rule is cleaned up properly before the cluster disappears out from under it
+ * kubectl delete -f hello-app.yaml
+ * gcloud container clusters delete learning-gke --region us-central1
+ * </pre>
+ * {@code hello-app.yaml} itself is two documents in one file
+ * (YAML {@code ---} separator): a {@code Deployment} (desired state: how
+ * many replicas of which container image) and a {@code Service} of
+ * {@code type: LoadBalancer} (how to reach them from outside the cluster) -
+ * the two-resource pattern almost every real workload starts from, with a
+ * third (Ingress) added only once multiple services need to share one
+ * entry point (see "Ingress deliberately NOT used" in "How we created
+ * this" above for why this module didn't need it).
+ *
+ * <h2>Quick reference</h2>
+ * <p><b>Auth pattern used here - genuinely different from every other
+ * module.</b> There's no impersonation or ADC call in this workflow because
+ * {@code kubectl}'s auth is a SEPARATE layer from GCP IAM: step 1 above
+ * (`get-credentials`) uses your gcloud/ADC identity ONCE, to fetch a
+ * short-lived credential plugin config, but every subsequent
+ * {@code kubectl} command authenticates to the Kubernetes API SERVER
+ * itself (which then applies its OWN RBAC rules, layered on top of, not
+ * instead of, whatever GCP IAM role got you connected in the first place) -
+ * GKE effectively has two authorization systems stacked (IAM: can you
+ * reach the cluster at all; Kubernetes RBAC: what can you do once
+ * connected), neither of which this module's simple deploy needed to
+ * configure beyond the defaults.
+ *
+ * <p><b>Important kubectl commands to know, beyond what this module used:</b>
+ * <ul>
+ *   <li>{@code kubectl logs &lt;pod&gt;} / {@code kubectl logs -f &lt;pod&gt;} -
+ *       the first thing to reach for when a pod is unhealthy - stdout/
+ *       stderr from the container, streamed live with {@code -f}.</li>
+ *   <li>{@code kubectl describe pod &lt;pod&gt;} - the EVENTS section at the
+ *       bottom is where scheduling failures, image-pull errors, and probe
+ *       failures actually show up - more useful for "why won't this start"
+ *       than {@code get pods}' one-line status alone.</li>
+ *   <li>{@code kubectl exec -it &lt;pod&gt; -- /bin/sh} - a shell inside a
+ *       running container, for live debugging - not available at all on
+ *       some minimal/distroless images by design, worth knowing before
+ *       relying on it as a debugging plan.</li>
+ *   <li>{@code kubectl rollout status deployment/&lt;name&gt;} /
+ *       {@code kubectl rollout undo deployment/&lt;name&gt;} - watch a rolling
+ *       update's progress, or roll back to the previous revision - the
+ *       command-line face of the "desired state reconciliation" concept in
+ *       the System design section above.</li>
+ * </ul>
+ *
+ * <p><b>Common errors and what they actually mean:</b>
+ * <ul>
+ *   <li>{@code ImagePullBackOff} in {@code kubectl get pods} - the node
+ *       can't pull the container image - a typo'd image name/tag, a
+ *       private registry the cluster's identity can't authenticate to
+ *       (Artifact Registry needs the node/Workload Identity to hold
+ *       {@code roles/artifactregistry.reader}), or (rare, but real) a
+ *       public registry rate-limiting anonymous pulls.</li>
+ *   <li>Pod stuck {@code Pending} - almost always a scheduling constraint
+ *       that can't be satisfied: on Autopilot specifically, a MISSING
+ *       resource request/limit is rejected outright rather than defaulted
+ *       silently the way Standard mode would (see "How we created this"
+ *       above); {@code kubectl describe pod} shows the exact reason.</li>
+ *   <li>Service's {@code EXTERNAL-IP} stays {@code &lt;pending&gt;}
+ *       indefinitely - a real, if usually transient (1-2 minutes), part of
+ *       Load Balancer provisioning; if it never resolves, check
+ *       {@code kubectl describe service} for quota errors (a project-level
+ *       cap on the number of forwarding rules/external IPs exists and is
+ *       occasionally hit).</li>
+ * </ul>
+ *
+ * <h2>Production practices - what this demo skips that real work needs</h2>
+ * <p><b>1. Never {@code kubectl apply} by hand against a real cluster.</b>
+ * This module's manual {@code kubectl apply -f hello-app.yaml} is
+ * appropriate for a learning exercise and a genuine anti-pattern for
+ * anything real - a production GKE workflow deploys through CI/CD (Cloud
+ * Build, GitHub Actions, Argo CD) applying manifests from a reviewed git
+ * commit, with the cluster's actual state as a downstream EFFECT of a
+ * merged PR, not a developer's local terminal.
+ * <p><b>2. Resource requests AND limits on every container, deliberately
+ * sized.</b> Autopilot forced this module to specify a resource request at
+ * all (see "How we created this" above); a real deployment should also set
+ * LIMITS (a ceiling, not just a floor) and size both against actual
+ * measured usage (via {@code kubectl top pod} or Cloud Monitoring), not
+ * copy-pasted defaults - an under-sized request causes the scheduler to
+ * pack too many pods per node (real contention); an over-sized one wastes
+ * money paying for capacity that's requested but never used.
+ * <p><b>3. Liveness, readiness, AND startup probes - not just "the pod
+ * started."</b> This module's minimal manifest has none of the three -
+ * Kubernetes' default behavior (a process that hasn't crashed is
+ * considered healthy) is a real production gap: a READINESS probe stops
+ * traffic reaching a pod that's up but not yet able to serve (e.g. still
+ * warming a cache); a LIVENESS probe restarts a pod that's up but
+ * genuinely stuck (deadlocked, wedged); a STARTUP probe gives a slow-
+ * booting app (a big JVM app is the classic case) room to initialize
+ * before liveness checks start counting against it.
+ * <p><b>4. Namespaces to separate environments/teams sharing one
+ * cluster.</b> This module's single {@code hello-app} deployment lives in
+ * the {@code default} namespace, fine for a one-workload learning cluster -
+ * a real cluster serving multiple teams/environments should use namespaces
+ * (plus {@code ResourceQuota}/{@code NetworkPolicy} per namespace) so one
+ * team's misconfigured workload can't starve or reach another's.
+ * <p><b>5. Secrets via Kubernetes Secrets backed by Secret Manager, never
+ * baked into an image or a plain env var in the YAML.</b> This module's
+ * stateless "hello world" container needed no secrets at all - a real
+ * workload's database password/API key should be a Kubernetes
+ * {@code Secret} (ideally synced from Secret Manager via the Secret
+ * Manager CSI driver, not hand-created and left unrotated) mounted as a
+ * file or env var at runtime, never committed into the image or the plain
+ * YAML manifest itself.
  */
 package com.ashfaq.gcplab._07_gke;

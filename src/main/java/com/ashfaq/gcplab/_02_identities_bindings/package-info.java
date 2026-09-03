@@ -136,5 +136,168 @@
  * impersonation; JSON keys should be the last resort, for the rare
  * external/non-GCP caller that has no other option, with rotation and
  * expiry policy planned in from day one.
+ *
+ * <h2>When to use each piece of this module</h2>
+ * Create a NEW service account per workload/service, not one shared
+ * "backend" identity for everything - the whole point of narrow custom
+ * roles ({@code _01_iam}) is defeated if every app shares one identity with
+ * the union of every app's permissions. Reach for a project-level IAM
+ * BINDING ({@code IamBindingDemo}'s job) when the access genuinely applies
+ * project-wide; reach for a resource-level binding instead (not
+ * demonstrated in this module, but the same {@code getIamPolicy}/
+ * {@code setIamPolicy} shape on a bucket/dataset/instance directly) when
+ * access should be scoped to one specific resource, not everything of that
+ * type in the project. Reach for {@code IamPermissionTestDemo}'s
+ * impersonate-and-verify pattern any time "I configured this correctly" is
+ * about to be trusted without being checked - a five-line verification
+ * beats a production incident discovered by a user.
+ *
+ * <h2>Sample usage walkthrough - each demo class, what it proves</h2>
+ * <b>{@link ServiceAccountDemo} - create/get/delete, and a reusable
+ * package-visible constant other classes in this package build on:</b>
+ * <pre>
+ * static final String ACCOUNT_EMAIL = ACCOUNT_ID + "@" + PROJECT_ID + ".iam.gserviceaccount.com";
+ *
+ * ServiceAccount created = iam.projects().serviceAccounts()
+ *     .create("projects/" + PROJECT_ID, new CreateServiceAccountRequest()
+ *         .setAccountId("backend-dev-sa")
+ *         .setServiceAccount(new ServiceAccount().setDisplayName("Backend Developer SA")))
+ *     .execute();
+ * </pre>
+ * Note {@code ACCOUNT_EMAIL} is package-private ({@code static final}, no
+ * modifier) rather than duplicated as a string literal in every other class
+ * in this package - {@link IamBindingDemo} and {@link IamPermissionTestDemo}
+ * both reference {@code ServiceAccountDemo.ACCOUNT_EMAIL} directly. A small,
+ * deliberate example of controlled coupling WITHIN a package (fine) versus
+ * across packages (each module in this repo instead re-declares its own
+ * {@code PROJECT_ID}/{@code SERVICE_ACCOUNT_EMAIL} constants rather than
+ * importing another package's - see the Quick reference in later modules'
+ * "reuse the client" notes for why cross-package coupling is deliberately
+ * avoided beyond a few explicit exceptions like
+ * {@code ProductCatalogGenerator}).
+ * <p>
+ * <b>{@link IamBindingDemo} - the read-modify-write pattern for editing a
+ * policy without clobbering concurrent changes:</b>
+ * <pre>
+ * Policy current = client.getIamPolicy(GetIamPolicyRequest.newBuilder()
+ *     .setResource("projects/" + PROJECT_ID).build());
+ *
+ * // find-or-create the binding for this role, add the member
+ * Policy.Builder updated = current.toBuilder();
+ * // ... mutate updated's bindings list in memory ...
+ *
+ * client.setIamPolicy(SetIamPolicyRequest.newBuilder()
+ *     .setResource("projects/" + PROJECT_ID)
+ *     .setPolicy(updated.build())     // carries the SAME etag as `current`
+ *     .build());
+ * // if the policy changed underneath us between get and set, the etag
+ * // mismatch causes setIamPolicy to fail rather than silently overwrite
+ * </pre>
+ * The {@code unbind} path additionally shows the "drop the binding entirely
+ * once its last member is removed" detail - a binding with an empty member
+ * list is not the same as no binding, and leaving empty bindings around is
+ * exactly the kind of policy debris that makes a real project's IAM policy
+ * hard to read months later.
+ * <p>
+ * <b>{@link IamPermissionTestDemo} - impersonate, then ask "what can this
+ * identity ACTUALLY do" instead of assuming:</b>
+ * <pre>
+ * ImpersonatedCredentials impersonated = ImpersonatedCredentials.create(
+ *     GoogleCredentials.getApplicationDefault(),
+ *     ServiceAccountDemo.ACCOUNT_EMAIL,
+ *     null,
+ *     List.of("https://www.googleapis.com/auth/cloud-platform"),
+ *     300);   // token lifetime in seconds
+ *
+ * ProjectsClient client = ProjectsClient.create(ProjectsSettings.newBuilder()
+ *     .setCredentialsProvider(FixedCredentialsProvider.create(impersonated))
+ *     .build());
+ *
+ * TestIamPermissionsResponse resp = client.testIamPermissions(
+ *     TestIamPermissionsRequest.newBuilder()
+ *         .setResource("projects/" + PROJECT_ID)
+ *         .addAllPermissions(List.of("storage.objects.get", "compute.instances.delete", ...))
+ *         .build());
+ * // resp.getPermissionsList() contains ONLY the ones actually granted -
+ * // silently omits the rest, so a permission's ABSENCE from the response
+ * // is how you know it's denied, not an explicit "DENIED" entry
+ * </pre>
+ *
+ * <h2>Quick reference</h2>
+ * <p><b>Auth pattern used here, and why it differs per class.</b>
+ * {@code ServiceAccountDemo} and {@code IamBindingDemo} run as YOUR OWN ADC
+ * identity (creating/binding identities is an admin action, same reasoning
+ * as {@code _01_iam}'s role management staying on human credentials).
+ * {@code IamPermissionTestDemo} is the odd one out, deliberately: it
+ * IMPERSONATES backend-dev-sa specifically because the whole point is
+ * testing what THAT identity can do, not what you can do.
+ *
+ * <p><b>Important classes/methods to know:</b>
+ * <ul>
+ *   <li>{@code ImpersonatedCredentials.create(source, targetPrincipal,
+ *       delegates, scopes, lifetimeSeconds)} - the core impersonation call;
+ *       {@code delegates} (null here) is for CHAINED impersonation (A
+ *       impersonates B who impersonates C) - not needed for a single hop,
+ *       real for multi-team delegation setups.</li>
+ *   <li>{@code ProjectsClient.getIamPolicy}/{@code setIamPolicy}/
+ *       {@code testIamPermissions} - the three-verb surface for
+ *       project-level policy work; the same three methods exist on other
+ *       resource-specific clients (e.g. a bucket's IAM policy via
+ *       {@code Storage}) for resource-scoped bindings instead of
+ *       project-wide.</li>
+ *   <li>{@code Policy.getEtag()} - opaque optimistic-concurrency token;
+ *       always round-trip it (get it, then set it back unchanged on the
+ *       policy you write) rather than omitting it - omitting it is what
+ *       turns this into a silent last-write-wins race instead of a safe
+ *       read-modify-write.</li>
+ * </ul>
+ *
+ * <p><b>Common errors and what they actually mean:</b>
+ * <ul>
+ *   <li>{@code PERMISSION_DENIED} on {@code ImpersonatedCredentials.create}
+ *       succeeding but the FIRST call using the token failing - the caller
+ *       needs {@code roles/iam.serviceAccountTokenCreator} ON the target SA
+ *       specifically (a grant ON the service-account resource, not a
+ *       project-level role) - this is the single most common setup miss
+ *       when wiring up impersonation for the first time.</li>
+ *   <li>{@code ABORTED} on {@code setIamPolicy} - the etag didn't match
+ *       (someone/something changed the policy between your get and set) -
+ *       the correct response is retry the whole read-modify-write cycle
+ *       from a fresh {@code getIamPolicy}, never retry with the stale
+ *       policy object.</li>
+ *   <li>A permission missing from {@code testIamPermissions}'s response
+ *       that you're certain was granted - check binding SCOPE (a resource-
+ *       level binding doesn't show up when testing at the project level,
+ *       and vice versa) before assuming the role/binding itself is wrong.</li>
+ * </ul>
+ *
+ * <h2>Production practices - what this demo skips that real work needs</h2>
+ * <p><b>1. One service account per workload, enforced, not just
+ * recommended.</b> This repo's own {@code backend-dev-sa} is intentionally
+ * the ONLY app identity across many modules ({@code _03} through
+ * {@code _12}) - a deliberate simplification for a single-developer
+ * learning project. A real team should treat that as an anti-pattern: each
+ * deployable service gets its own service account, so a compromise or bug
+ * in one service can't reach what another service's identity can touch -
+ * exactly the reasoning {@code _09_ai_commerce_search}'s Production
+ * practices section calls out for search-serving vs. catalog-admin access
+ * specifically.
+ * <p><b>2. Workload Identity Federation for anything NOT running on GCP.</b>
+ * This module's impersonation pattern (a GCP-authenticated human/service
+ * "acting as" another SA) assumes the caller already has a GCP identity.
+ * For workloads running OUTSIDE GCP entirely (GitHub Actions, another
+ * cloud, an on-prem CI runner) that need to call GCP APIs, Workload
+ * Identity Federation lets them exchange an EXTERNAL identity token (a
+ * GitHub Actions OIDC token, an AWS IAM role) directly for GCP credentials
+ * - no JSON key ever created or downloaded, the true zero-key equivalent of
+ * this module's impersonation pattern for non-GCP callers.
+ * <p><b>3. Audit who can impersonate whom, on a schedule.</b>
+ * {@code roles/iam.serviceAccountTokenCreator} grants are exactly the kind
+ * of permission that should be periodically reviewed
+ * ({@code gcloud iam service-accounts get-iam-policy <sa-email>} across
+ * every SA in a project) - an unused or forgotten TokenCreator grant is a
+ * standing "who else can act as this identity" risk that {@code
+ * IamPermissionTestDemo}'s verification pattern doesn't catch (it proves
+ * what the SA CAN do, not who else can BECOME the SA).
  */
 package com.ashfaq.gcplab._02_identities_bindings;

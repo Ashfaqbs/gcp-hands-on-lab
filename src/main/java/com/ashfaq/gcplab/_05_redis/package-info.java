@@ -140,5 +140,121 @@
  * for Memorystore's cluster mode (sharding across multiple nodes, not used
  * in this module's single Basic-tier instance) only once a single node's
  * memory or single-threaded throughput genuinely becomes the bottleneck.
+ *
+ * <h2>When to use this service</h2>
+ * Reach for Redis/Memorystore when the access pattern is "read this exact
+ * key, very often, and it's fine if it's occasionally stale or briefly
+ * missing" - session storage, a cache-aside layer in front of a slower
+ * source of truth (Cloud SQL/Spanner/an external API), rate-limiting
+ * counters, or a leaderboard (sorted sets). Do NOT reach for it as a
+ * primary datastore - nothing here has Cloud SQL/Spanner's durability
+ * guarantees (Basic tier, used throughout this module, has NO persistence
+ * or replica at all - see Internal architecture above), and do not reach
+ * for it to pass messages between services (that's Pub/Sub's job, not a
+ * key-value store's, even though Redis technically has a pub/sub feature).
+ *
+ * <h2>Sample usage walkthrough - what {@link CacheCrudDemo} proves</h2>
+ * <pre>
+ * try (Jedis jedis = new Jedis("localhost", 6379)) {   // through the SSH tunnel, see below
+ *     jedis.setex("employee:1:name", 300, "Ashfaq");    // SET with a 300s TTL - always set one
+ *
+ *     String value = jedis.get("employee:1:name");
+ *     long ttlRemaining = jedis.ttl("employee:1:name"); // seconds left, -2 if key doesn't exist
+ *
+ *     jedis.setex("employee:1:name", 300, "Ashfaq (Senior)"); // "update" = overwrite + reset TTL,
+ *                                                              // Redis has no separate UPDATE verb
+ *     long removed = jedis.del("employee:1:name");       // returns count actually removed (0 or 1 here)
+ * }
+ * </pre>
+ * The demo deliberately shows only plain string SET/GET - Redis's real
+ * power for structured data (a Hash for an object's fields, a Sorted Set
+ * for a leaderboard/ranking, a List for a queue, atomic {@code INCR} for
+ * counters) is a genuine gap this module doesn't cover; see Production
+ * practices below for what those look like and when to reach for each.
+ *
+ * <h2>Quick reference</h2>
+ * <p><b>Auth pattern used here - the one module in this repo with NO GCP
+ * IAM auth at all on the data path.</b> Reaching Redis at all requires the
+ * SSH tunnel (a Compute Engine / OS Login concern, not an IAM-role-to-
+ * Memorystore concern), and once connected, Jedis speaks the raw Redis
+ * protocol directly - {@code jedis.auth(password)} would be the call to add
+ * if AUTH were enabled (it wasn't for this throwaway instance, see the
+ * package-level note on that). This is fundamentally different from every
+ * other data-plane demo in this repo (Firestore/Storage/Spanner/BigQuery
+ * all authenticate via impersonated backend-dev-sa) - Memorystore's access
+ * control is network-boundary + optional Redis-native AUTH, not IAM
+ * permissions on the data itself.
+ *
+ * <p><b>Important classes/methods to know:</b>
+ * <ul>
+ *   <li>{@code Jedis} - the synchronous client used throughout this module;
+ *       {@code JedisPool}/{@code JedisPooled} (NOT used here, same gap as
+ *       {@code _04_cloudsql}'s connection-pooling story) is the production-
+ *       shaped alternative for a long-running service - a fresh
+ *       {@code new Jedis(host, port)} per operation (this module's
+ *       per-CLI-invocation pattern) is fine for a one-shot script, wrong
+ *       for a service handling many requests.</li>
+ *   <li>{@code setex(key, seconds, value)} vs. plain {@code set(key, value)} -
+ *       {@code setex} is the TTL-inclusive convenience form used throughout
+ *       this module; reaching for plain {@code set} means explicitly
+ *       deciding "this key should live forever," which should be a rare,
+ *       deliberate choice, not a default.</li>
+ *   <li>{@code ttl(key)} - returns seconds remaining, or {@code -1} if the
+ *       key exists with NO expiry, or {@code -2} if the key doesn't exist
+ *       at all - three genuinely different meanings collapsed into one
+ *       return value, worth checking explicitly rather than assuming any
+ *       negative number means "missing."</li>
+ * </ul>
+ *
+ * <p><b>Common errors and what they actually mean:</b>
+ * <ul>
+ *   <li>Connection refused on {@code new Jedis("localhost", 6379)} - the SSH
+ *       tunnel isn't open (see "How we created this" below) - Redis itself
+ *       being healthy doesn't help if the tunnel process died or was never
+ *       started; check the tunnel process first, not Memorystore's own
+ *       status.</li>
+ *   <li>{@code jedis.get(key)} returns {@code null} sooner than expected -
+ *       either the TTL genuinely expired (check with {@code ttl()} on a
+ *       fresh write to confirm the expected window), or Basic tier's lack
+ *       of persistence meant an instance restart/failover wiped the whole
+ *       keyspace (see Internal architecture above - this IS the deal Basic
+ *       tier makes, not a bug).</li>
+ *   <li>{@code JedisConnectionException} mid-operation - Basic tier has no
+ *       replica and no automatic failover (see Internal architecture) - a
+ *       node-level hiccup on Google's side genuinely drops the connection
+ *       with no fallback; Standard/HA tier's replica exists specifically to
+ *       avoid this class of interruption.</li>
+ * </ul>
+ *
+ * <h2>Production practices - what this demo skips that real work needs</h2>
+ * <p><b>1. Reach for the right data structure, not just strings.</b> This
+ * module's plain SET/GET is the simplest case; real caching workloads
+ * usually want: a HASH ({@code jedis.hset("employee:1", Map.of("name",
+ * "Ashfaq", "role", "Backend Developer"))}) to cache a whole object as one
+ * key without JSON-serializing it yourself; a SORTED SET
+ * ({@code jedis.zadd("leaderboard", score, member)}) for rankings/
+ * leaderboards with O(log n) insert and O(log n) range queries; atomic
+ * {@code INCR}/{@code INCRBY} for counters (rate limiters, view counts) -
+ * genuinely atomic even under concurrent access, unlike a GET-then-SET
+ * round trip from application code, which has a real race condition.
+ * <p><b>2. Connection pooling for a real service, same story as
+ * {@code _04_cloudsql}.</b> {@code JedisPool} (or the newer
+ * {@code JedisPooled}) should back a long-running service - constructing a
+ * new {@code Jedis} instance per operation (this module's per-CLI-
+ * invocation pattern, appropriate here) adds real, avoidable per-call
+ * connection overhead at request volume.
+ * <p><b>3. AUTH and TLS genuinely enabled, not left off.</b> This module's
+ * instance came up with AUTH unset by accident (documented honestly above,
+ * not smoothed over) - a real deployment should set AUTH explicitly at
+ * instance creation and use {@code jedis.auth(password)} (or a connection
+ * URI with credentials) before any operation, plus in-transit encryption
+ * for anything crossing a network boundary that isn't fully trusted.
+ * <p><b>4. Pipelining for bulk operations.</b> Not exercised in this
+ * module's single-key demo - {@code Jedis.pipelined()} batches many
+ * commands into one round trip instead of one network round trip PER
+ * command, the same "batch it" principle {@code _09_ai_commerce_search}'s
+ * Bulk API note and {@code _10_elasticsearch}'s bulk-indexing tuning both
+ * make for their own services - relevant the moment a cache-warming or
+ * bulk-invalidation operation touches more than a handful of keys.
  */
 package com.ashfaq.gcplab._05_redis;
