@@ -286,5 +286,96 @@
  * each run IS the whole process lifetime; a real Spring service should
  * build this once as a {@code @Bean} and inject it everywhere, closing it
  * only on application shutdown.
+ *
+ * <h2>When to use this service</h2>
+ * Reach for Firestore when the data is naturally document-shaped (nested
+ * objects/arrays, no fixed schema across records) and the access pattern is
+ * "read/write one document, or a flat query, at low millisecond latency" -
+ * user profiles, product catalogs, session/app state, anything a mobile/web
+ * client might sync in real time via a listener. Reach for Cloud SQL/
+ * Spanner instead (see {@code _11_spanner}'s RDBMS-flow comparison table)
+ * when the data is genuinely relational (needs real joins/multi-table
+ * transactions) - Firestore's "no joins" trade (see "Firestore = GCP's
+ * native document DB" above) is a deliberate scalability choice, not a
+ * missing feature to work around with denormalization tricks past a
+ * certain complexity.
+ *
+ * <h2>Sample usage walkthrough - what {@link EmployeeDocCrudDemo} proves</h2>
+ * <pre>
+ * Firestore firestore = FirestoreOptions.newBuilder()
+ *     .setProjectId(PROJECT_ID)
+ *     .setDatabaseId("learning-native")                 // a project can host MULTIPLE databases
+ *     .setCredentialsProvider(FixedCredentialsProvider.create(impersonatedCredentials))
+ *     .build()
+ *     .getService();
+ *
+ * DocumentReference doc = firestore.collection("employees").document("emp-1");
+ *
+ * doc.set(Map.of("name", "Ashfaq", "role", "Backend Developer",
+ *                 "skills", List.of("Java", "Spring Boot", "GCP"))).get();  // .get() blocks for the write
+ *
+ * DocumentSnapshot snapshot = doc.get().get();
+ * boolean exists = snapshot.exists();
+ * Map&lt;String, Object&gt; data = snapshot.getData();
+ *
+ * doc.update("role", "Senior Backend Developer").get();   // partial update - only this field changes
+ * doc.delete().get();
+ * </pre>
+ * Notice there's no {@code CREATE TABLE}/{@code CREATE SCHEMA} anywhere -
+ * the {@code employees} collection is created IMPLICITLY by the first
+ * document write, the defining trait of a schemaless document DB (contrast
+ * every SQL-shaped module in this repo, where the table/schema must exist
+ * before the first row can be written).
+ *
+ * <h2>Quick reference</h2>
+ * <p><b>Auth pattern used here.</b> Impersonated backend-dev-sa - see
+ * "Correction: the CRUD demo now runs AS backend-dev-sa, not as you" above
+ * for the real mistake this fixed (the first pass used plain ADC, quietly
+ * running as a human instead of simulating a real application identity).
+ *
+ * <p><b>Important classes/methods to know:</b>
+ * <ul>
+ *   <li>{@code Firestore} - the single client for everything (documents,
+ *       collections, transactions, listeners); build once, reuse for the
+ *       app's lifetime (see Production practices above).</li>
+ *   <li>{@code DocumentReference} vs. {@code DocumentSnapshot} - a
+ *       reference is just an ADDRESS (doesn't mean the document exists);
+ *       a snapshot is the actual DATA at a point in time, returned by
+ *       {@code .get()} - always check {@code snapshot.exists()} before
+ *       reading fields, since a reference to a non-existent document is a
+ *       completely valid, non-throwing object to hold.</li>
+ *   <li>{@code doc.set(...)} (overwrite the whole document) vs.
+ *       {@code doc.update(...)} (patch specific fields, fails if the
+ *       document doesn't exist) vs. {@code doc.set(..., SetOptions.merge())}
+ *       (merge specific fields, CREATES the document if missing) - three
+ *       genuinely different semantics easy to reach for the wrong one of;
+ *       this module only exercises the first two.</li>
+ *   <li>Every write method returns an {@code ApiFuture} - the API is async
+ *       by default; {@code .get()} (used throughout this module) blocks
+ *       until complete, appropriate for a CLI demo, wrong for a real
+ *       service's request-handling thread (see Production practices for
+ *       the async-listener alternative).</li>
+ * </ul>
+ *
+ * <p><b>Common errors and what they actually mean:</b>
+ * <ul>
+ *   <li>{@code PERMISSION_DENIED} on any operation - backendDeveloper needs
+ *       {@code datastore.entities.*} (the Firestore IAM permission
+ *       namespace is still called "datastore" - see "We picked Firestore
+ *       with MongoDB compatibility" above for the historical reason) -
+ *       added via {@code _01_iam}'s {@code UpdateRoleDemo}, the first PATCH
+ *       this repo's roles ever needed.</li>
+ *   <li>{@code FAILED_PRECONDITION: Access to this database via the
+ *       Firestore in Native mode API is disabled} - a database created in
+ *       MongoDB-compatibility mode rejecting a Native-SDK call - see "We
+ *       picked Firestore with MongoDB compatibility" above; this is a
+ *       ONE-WAY, PERMANENT choice per database, not a config flag to flip
+ *       back.</li>
+ *   <li>A composite query throwing {@code FAILED_PRECONDITION} with a
+ *       Console link to create an index - not exercised by this module's
+ *       single-field lookups, but the single most common real Firestore
+ *       error in a growing application - see Production practices' index
+ *       deployment note for the CI-safe fix.</li>
+ * </ul>
  */
 package com.ashfaq.gcplab._06_firestore;

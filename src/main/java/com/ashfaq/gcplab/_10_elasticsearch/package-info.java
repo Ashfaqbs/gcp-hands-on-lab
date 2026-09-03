@@ -390,5 +390,116 @@
  * elasticsearch-java}) handle connection pooling, retries, and request/
  * response (de)serialization automatically and are the right choice for
  * anything beyond a small, dependency-free learning exercise like this one.
+ *
+ * <h2>When to use this service</h2>
+ * Reach for self-hosted Elasticsearch when free-text search/relevance
+ * ranking IS the product requirement and either (a) the team wants full
+ * control over analyzers/ranking/synonyms rather than a managed product's
+ * opinions, or (b) cost at high query volume favors a flat VM cost over
+ * per-request billing (see the Cost model section above's crossover math).
+ * Reach for {@code _09_ai_commerce_search} instead when the domain is
+ * specifically retail/product search and the team would rather not own
+ * cluster operations (patching, scaling, backups) at all - see this
+ * module's own "actual finding" above for the real, measured trade-off
+ * between the two, not an assumption.
+ *
+ * <h2>Sample usage walkthrough - each demo class, what it proves</h2>
+ * <b>{@link CatalogIndexDemo} - explicit mapping, then a real bulk
+ * request, plain {@code HttpClient}, no ES client library:</b>
+ * <pre>
+ * // 1. Explicit mapping BEFORE any data - text fields get analyzed/tokenized,
+ * //    keyword fields are matched exactly (see Internal architecture above)
+ * String mapping = """
+ *     { "mappings": { "properties": {
+ *       "title":     { "type": "text" },
+ *       "category":  { "type": "keyword" },
+ *       "price":     { "type": "float" }
+ *     }}}""";
+ * http.send(HttpRequest.newBuilder(URI.create(ES_URL + "/products"))
+ *     .PUT(HttpRequest.BodyPublishers.ofString(mapping)).build(), ...);
+ *
+ * // 2. Bulk API - newline-delimited JSON, ONE HTTP call for all 703 products,
+ * //    never 703 individual PUTs (see Production practices' bulk-tuning note)
+ * StringBuilder bulk = new StringBuilder();
+ * for (Product p : products) {
+ *     bulk.append("{\"index\":{\"_index\":\"products\",\"_id\":\"" + p.getId() + "\"}}\n");
+ *     bulk.append("{\"title\":...,\"price\":" + p.getPriceInfo().getPrice() + "}\n");
+ * }
+ * http.send(HttpRequest.newBuilder(URI.create(ES_URL + "/_bulk"))
+ *     .header("Content-Type", "application/x-ndjson")
+ *     .POST(HttpRequest.BodyPublishers.ofString(bulk.toString())).build(), ...);
+ *
+ * // 3. Refresh explicitly before counting/searching - writes aren't visible
+ * //    until the next refresh cycle (see Internal architecture above)
+ * http.send(HttpRequest.newBuilder(URI.create(ES_URL + "/products/_refresh")).POST(...).build(), ...);
+ * </pre>
+ * Verified live: all 703 documents indexed with {@code "errors":false} in
+ * the bulk response, confirmed by a separate {@code _count} call afterward.
+ * <p>
+ * <b>{@link SearchQualityCompareDemo} - a plain, untuned {@code multi_match}
+ * query, deliberately not the best Elasticsearch can do:</b>
+ * <pre>
+ * String query = """
+ *     { "query": { "multi_match": {
+ *       "query": "%s",
+ *       "fields": ["title^2", "description", "attribute"]
+ *     }}}""".formatted(userQueryText);
+ *
+ * HttpResponse&lt;String&gt; resp = http.send(HttpRequest.newBuilder(URI.create(ES_URL + "/products/_search"))
+ *     .POST(HttpRequest.BodyPublishers.ofString(query)).build(), HttpResponse.BodyHandlers.ofString());
+ * // top 3 result titles extracted from resp.body(), scored by hand against
+ * // the same 1-10 rubric _09's audit used
+ * </pre>
+ * {@code title^2} boosts matches in the title field 2x relative to
+ * description/attribute matches - the one piece of tuning this module DOES
+ * apply, deliberately minimal, to keep the comparison an honest "default
+ * behavior" test rather than a tuned-ES-vs-untuned-Vertex mismatch.
+ *
+ * <h2>Quick reference</h2>
+ * <p><b>Auth pattern used here - none, deliberately.</b> Unlike every GCP-
+ * native module in this repo, there's no {@code GoogleCredentials}/
+ * impersonation anywhere - X-Pack security was explicitly disabled for
+ * this throwaway VM (see "How the VM and Elasticsearch were set up" above),
+ * so {@code HttpClient} just calls plain HTTP with no auth header at all.
+ * The REAL access control here is the firewall rule scoped to one IP - see
+ * Production practices' security note for why this is NOT the pattern for
+ * anything beyond a same-session learning VM.
+ *
+ * <p><b>Important REST endpoints to know, beyond what this module used:</b>
+ * <ul>
+ *   <li>{@code GET /_cluster/health} - green/yellow/red cluster status, the
+ *       first thing to check when something seems wrong (see Production
+ *       practices' monitoring note above for what each color means).</li>
+ *   <li>{@code GET /products/_mapping} - confirms what mapping actually
+ *       landed, useful when a field isn't matching as expected (a field
+ *       mapped {@code keyword} when {@code text} was intended is a common,
+ *       silent cause of "why doesn't this query match").</li>
+ *   <li>{@code POST /products/_delete_by_query} - bulk delete matching a
+ *       query, the ES equivalent of {@code _09}'s {@code purgeProductsAsync}
+ *       or {@code _12_bigquery}'s partitioned DML - not used in this
+ *       module's teardown (the whole VM was deleted instead), but the right
+ *       tool for clearing a live index without destroying the cluster.</li>
+ * </ul>
+ *
+ * <p><b>Common errors and what they actually mean:</b>
+ * <ul>
+ *   <li>{@code Connection refused} on every {@code HttpClient} call -
+ *       almost always the VM's firewall rule (scoped to one IP - see setup
+ *       above) not matching the CALLER's current IP, or the VM itself no
+ *       longer existing (this repo tears it down every session) - check
+ *       {@code gcloud compute instances list} before assuming an
+ *       Elasticsearch-side problem.</li>
+ *   <li>Bulk response body containing {@code "errors":true} despite an HTTP
+ *       200 - the Bulk API returns 200 even when SOME individual documents
+ *       in the batch failed (a mapping conflict on one document doesn't
+ *       fail the whole batch) - always check the {@code errors} field in
+ *       the body, never just the HTTP status code, exactly what {@link
+ *       CatalogIndexDemo} does.</li>
+ *   <li>A just-indexed document not showing up in search results
+ *       immediately - the refresh-interval visibility delay (see Internal
+ *       architecture above, default ~1s) - {@link CatalogIndexDemo} calls
+ *       {@code _refresh} explicitly specifically to avoid a flaky "count
+ *       came back wrong" result depending on timing.</li>
+ * </ul>
  */
 package com.ashfaq.gcplab._10_elasticsearch;

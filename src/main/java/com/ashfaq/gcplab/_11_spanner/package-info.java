@@ -274,6 +274,99 @@
  *       items. Total instance lifetime: well under 15 minutes.</li>
  * </ul>
  *
+ * <h2>Sample usage walkthrough - each demo class, what it proves</h2>
+ * <b>{@link SchemaDemo} - DDL as its own async operation, via the ADMIN
+ * client:</b>
+ * <pre>
+ * DatabaseAdminClient adminClient = spanner.getDatabaseAdminClient();
+ * adminClient.updateDatabaseDdl(INSTANCE_ID, DATABASE_ID, List.of("""
+ *     CREATE TABLE employees (
+ *       employee_id STRING(36) NOT NULL,
+ *       name STRING(200) NOT NULL,
+ *       created_at TIMESTAMP NOT NULL OPTIONS (allow_commit_timestamp = true)
+ *     ) PRIMARY KEY (employee_id)
+ *     """), null).get(5, TimeUnit.MINUTES);   // blocks on the async DDL operation
+ * </pre>
+ * <b>{@link EmployeeCrudDemo} - the DATA client, two genuinely different
+ * write paths shown deliberately:</b>
+ * <pre>
+ * DatabaseClient client = spanner.getDatabaseClient(DatabaseId.of(PROJECT_ID, INSTANCE_ID, DATABASE_ID));
+ *
+ * // MUTATION - a point write, Spanner's own primitive, no SQL involved
+ * client.write(List.of(Mutation.newInsertBuilder("employees")
+ *     .set("employee_id").to(id)
+ *     .set("name").to("Ashfaq")
+ *     .set("created_at").to(Value.COMMIT_TIMESTAMP)   // server-assigned, not client clock
+ *     .build()));
+ *
+ * // READ - strong-consistent by default (see Internal architecture above
+ * // for the read-staleness alternative)
+ * Struct row = client.singleUse().readRow("employees", Key.of(id), List.of("name", "created_at"));
+ *
+ * // DML inside an explicit read-write TRANSACTION - real SQL, transactionally safe
+ * client.readWriteTransaction().run(txn -&gt; {
+ *     long rows = txn.executeUpdate(Statement.newBuilder(
+ *             "UPDATE employees SET name = @name WHERE employee_id = @id")
+ *         .bind("name").to("Ashfaq (Senior)")
+ *         .bind("id").to(id)
+ *         .build());
+ *     return null;
+ * });
+ * </pre>
+ * Mutations are the cheaper, simpler choice for single-row point writes;
+ * DML-in-a-transaction is what to reach for when a write genuinely depends
+ * on a read or needs to touch multiple rows conditionally - this module
+ * deliberately exercises both rather than picking one, specifically so the
+ * choice between them is a real, seen decision, not a rule taken on faith.
+ *
+ * <h2>Quick reference</h2>
+ * <p><b>Auth pattern used here.</b> Impersonated backend-dev-sa, identical
+ * shape to every other data-plane demo in this repo - the one genuinely new
+ * piece is that TWO different client TYPES share the same credential:
+ * {@code DatabaseAdminClient} (schema) and {@code DatabaseClient} (data),
+ * both obtained from the same {@code Spanner} service object.
+ *
+ * <p><b>Important classes/methods to know:</b>
+ * <ul>
+ *   <li>{@code Spanner} (from {@code SpannerOptions.getService()}) - the
+ *       root object; {@code spanner.getDatabaseAdminClient()} and
+ *       {@code spanner.getDatabaseClient(DatabaseId)} both come from it -
+ *       build the root {@code Spanner} object once, not per operation (see
+ *       Production practices' session-pooling note above for why this
+ *       matters more here than for most clients).</li>
+ *   <li>{@code Mutation.newInsertBuilder}/{@code newUpdateBuilder}/
+ *       {@code newInsertOrUpdateBuilder}/{@code delete} - the point-write
+ *       primitives; {@code newInsertOrUpdateBuilder} (not used in this
+ *       module, which uses plain insert since the row is known not to
+ *       exist yet) is the upsert form worth knowing about.</li>
+ *   <li>{@code TimestampBound} - controls read staleness (see Internal
+ *       architecture above); {@code client.singleUse()} (used throughout
+ *       this module) defaults to strong reads - {@code client.singleUse(
+ *       TimestampBound.ofMaxStaleness(...))} is the lower-latency
+ *       alternative for read-heavy, staleness-tolerant paths.</li>
+ * </ul>
+ *
+ * <p><b>Common errors and what they actually mean:</b>
+ * <ul>
+ *   <li>{@code PERMISSION_DENIED: spanner.databaseOperations.get} on a DDL
+ *       call that actually succeeded server-side - the exact real error
+ *       this module hit (see "How we set this up" above) - the DDL itself
+ *       landed, only the OPERATION-POLLING permission was missing; check
+ *       {@code gcloud spanner databases ddl describe} before assuming the
+ *       schema change failed.</li>
+ *   <li>{@code ABORTED} inside a {@code readWriteTransaction()} block -
+ *       transaction contention (another transaction touched the same rows
+ *       concurrently) - the client library automatically RETRIES the whole
+ *       transaction closure on {@code ABORTED}, which is why the closure
+ *       passed to {@code .run(...)} must be side-effect-free outside of
+ *       Spanner writes (no "send an email" inside the transaction body -
+ *       it might run more than once).</li>
+ *   <li>{@code RESOURCE_EXHAUSTED} / high latency under real load - almost
+ *       always the hotspotting failure mode (see Production practices'
+ *       point #1 below) - check Key Visualizer before assuming more
+ *       processing units is the fix.</li>
+ * </ul>
+ *
  * <h2>Production practices - what this demo skips that real work needs</h2>
  *
  * <p><b>1. Primary key hotspotting - the #1 real-world Spanner production

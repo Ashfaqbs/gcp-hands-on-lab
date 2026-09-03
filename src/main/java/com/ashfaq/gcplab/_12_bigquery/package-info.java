@@ -425,6 +425,63 @@
  * {@code _01_iam}'s package-info documents up to ~7 minutes for) before
  * succeeding - real, worth-expecting latency, not a flake.
  *
+ * <h2>Quick reference</h2>
+ * <p><b>Auth pattern used here.</b> Impersonated backend-dev-sa throughout,
+ * same shape as every other data-plane demo in this repo - with one
+ * addition {@link ScheduledQueryDemo} needed that no other module did: a
+ * SEPARATE grant on the DATA TRANSFER SERVICE's own Google-managed agent
+ * (see "Two things BigQuery calls a job" above) so it can impersonate
+ * backend-dev-sa at scheduled-run time, not just at creation time.
+ *
+ * <p><b>Important classes/methods to know:</b>
+ * <ul>
+ *   <li>{@code BigQuery} (from {@code BigQueryOptions.getService()}) - the
+ *       single client for EVERYTHING - DDL, DML, SELECT, job management -
+ *       there is no separate admin client the way Spanner has
+ *       {@code DatabaseAdminClient} vs. {@code DatabaseClient} (see
+ *       {@code _11_spanner}'s Quick reference for that contrast
+ *       explicitly).</li>
+ *   <li>{@code bigquery.query(QueryJobConfiguration)} - the convenience
+ *       one-liner used by {@link SchemaDemo}/{@link EmployeeCrudDemo}/
+ *       {@link ProductAnalyticsDemo}/{@link TransformAndPersistDemo}, which
+ *       creates a {@code Job}, submits it, and polls to {@code DONE}
+ *       internally; {@link JobDemo} unwinds every one of those steps
+ *       manually to show what's actually happening underneath.</li>
+ *   <li>{@code QueryJobConfiguration.Builder.addNamedParameter(name,
+ *       QueryParameterValue)} - parameterized query values (used throughout
+ *       {@link EmployeeCrudDemo}) - the BigQuery-SQL equivalent of a JDBC
+ *       {@code PreparedStatement}'s {@code ?} placeholders, and just as
+ *       mandatory for anything built from user input, per this project's
+ *       own {@code security.md} rule against string-concatenated SQL.</li>
+ *   <li>{@code TableResult.iterateAll()} - lazily pages through results;
+ *       {@code TableResult.getTotalRows()} gives the count without
+ *       materializing every row - use it (as {@link EmployeeCrudDemo}'s
+ *       {@code read()} does) instead of iterating just to count.</li>
+ * </ul>
+ *
+ * <p><b>Common errors and what they actually mean:</b>
+ * <ul>
+ *   <li>{@code Not found: Dataset ...} on any operation - either a genuine
+ *       typo in the dataset ID, or (a real, non-obvious gotcha) the dataset
+ *       exists in a DIFFERENT location/region than the query job is
+ *       implicitly targeting - BigQuery jobs run in a specific location,
+ *       and a dataset created in {@code US} is invisible to a job that
+ *       resolved to {@code us-central1} or another distinct location
+ *       string, even though both sound like "the US."</li>
+ *   <li>{@code Quota exceeded: Your table exceeded quota for imports or
+ *       query jobs per table} - the real DML-rate-limit consequence flagged
+ *       in Production practices' point #1 below - a symptom that row-level
+ *       mutation traffic is being sent through BigQuery instead of a real
+ *       OLTP database.</li>
+ *   <li>A query that looks correct returning zero rows - check the FREE-
+ *       TIER-cached result isn't masking a real change: BigQuery caches a
+ *       query's result for ~24h keyed to the exact query text and the
+ *       underlying data's state: a query re-run verbatim can return a
+ *       CACHED (and by now stale) answer rather than reflecting a table
+ *       that changed moments ago, worth knowing before concluding a write
+ *       didn't take effect.</li>
+ * </ul>
+ *
  * <h2>Production practices - what this demo skips that real work needs</h2>
  *
  * <p><b>1. DML is not a replacement for a real OLTP database - the central
