@@ -194,6 +194,49 @@
  * DIFFERENT ids are assigned to what's conceptually the same product (a
  * generator/pipeline bug on the caller's side), never from the API's own
  * import/create semantics.
+ * <p>
+ * <b>Proven live, not just read from docs ({@link DuplicateHandlingDemo},
+ * 2026-09-03):</b> a concrete run against a scratch set of test products
+ * (all purged afterward) confirmed every claim above with real numbers, plus
+ * one nuance the REST reference doesn't spell out:
+ * <ul>
+ *   <li><b>{@code CreateProduct} x2, same id</b> - first call succeeded,
+ *       second threw {@code AlreadyExistsException} /
+ *       {@code ALREADY_EXISTS: Active product with the same name ... exists}
+ *       - exactly as documented.</li>
+ *   <li><b>The SAME id sent TWICE inside one {@code ImportProducts} batch</b>
+ *       (not covered by the REST reference at all - a genuinely different
+ *       question from "two separate import calls") - two versions of
+ *       {@code dup-demo-within-batch} ("Version A" and "Version B") sent in
+ *       one inline batch; the job reported {@code hasError=false}, and
+ *       exactly ONE row exists afterward - "Version B," the LAST one in the
+ *       batch. Last-write-wins within a single batch, same as if it were two
+ *       separate INCREMENTAL calls in sequence. Worth knowing: the very
+ *       first {@code GetProduct} right after the job's {@code done=true}
+ *       returned {@code NOT_FOUND} - a real, short (a few seconds)
+ *       propagation delay between "the import job finished" and "the write
+ *       is visible to a direct GetProduct call," separate from and shorter
+ *       than the catalog-store-to-search-index delay described in "Internal
+ *       architecture" above. Don't treat an immediate post-import GetProduct
+ *       miss as proof the write failed.</li>
+ *   <li><b>Two separate {@code ImportProducts} calls, 5 ids each, 3
+ *       overlapping</b> - Batch A: {@code x1-x5}, all "Original". Batch B:
+ *       {@code x1-x3} resent as "Updated By Batch B" plus genuinely new
+ *       {@code x6-x7}. Result: exactly 7 distinct products afterward (not
+ *       10), {@code x1}'s title read back as "Updated By Batch B" (the
+ *       overlapping id was overwritten in place), {@code x4}'s title read
+ *       back as "Original" (untouched, since Batch B never mentioned it) -
+ *       upsert-by-id confirmed with real counts and real title reads, not
+ *       just the documented claim.</li>
+ * </ul>
+ * The concrete scenario this answers directly: import 100 products where 20
+ * ids repeat ones already in the catalog - the result is 80 untouched rows
+ * plus 20 rows OVERWRITTEN in place (their fields now match whatever the new
+ * batch sent), never 120 rows and never an error. If those same 20
+ * duplicate ids ALSO repeat each other within the one 100-row batch (e.g.
+ * one id appears 3 times in the same call), only the LAST occurrence in
+ * send-order survives for that id - the earlier occurrences are silently
+ * discarded, not merged and not erroring.
  *
  * <h2>Catalog import: 703 synthetic products (2026-08-31)</h2>
  * {@link ProductCatalogGenerator} builds a realistic local-supermarket
