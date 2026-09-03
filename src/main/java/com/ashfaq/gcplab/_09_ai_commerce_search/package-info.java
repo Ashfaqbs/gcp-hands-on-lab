@@ -152,6 +152,49 @@
  * defaults specifically to measure that gap honestly. See "Internal
  * architecture" above for the full retrieval-vs-ranking breakdown.
  *
+ * <h2>Duplicate products - what actually happens on a repeated ID (a common
+ * point of confusion: "is there no mapping constraint at all?")</h2>
+ * There IS a schema - just not one you declare via DDL the way {@code
+ * _12_bigquery}'s {@code CREATE TABLE} or {@code _04_cloudsql}'s Flyway
+ * migration require. Every {@code Product} must conform to the API's own
+ * fixed proto shape ({@code id}, {@code title}, {@code description}, {@code
+ * categories}, {@code brands}, {@code priceInfo}, {@code availability},
+ * plus an open {@code attributes} map for custom key/value fields - the
+ * mechanism {@link ProductCatalogGenerator} uses for size/weight variants).
+ * You cannot import arbitrary JSON shaped however you like; the flexibility
+ * is confined to that one open map, not the whole record.
+ * <p>
+ * {@code Product.id} is the unique key, and duplicate-ID behavior genuinely
+ * differs by which of the two insert paths is used - confirmed directly
+ * against Google's REST API reference, not assumed:
+ * <ul>
+ *   <li><b>{@code CreateProduct}</b> (single item, synchronous) - a second
+ *       call with an ID that already exists under the same parent branch
+ *       returns an {@code ALREADY_EXISTS} error. No silent overwrite, no
+ *       duplicate row.</li>
+ *   <li><b>{@code ImportProducts}</b> (bulk, what {@link CatalogImportDemo}
+ *       uses for all 703) defaults to {@code ReconciliationMode.INCREMENTAL}
+ *       - "inserts new products or updates existing products." A batch
+ *       containing an ID already present in the branch UPDATES that product
+ *       in place - no error, no duplicate. Re-running {@link
+ *       CatalogImportDemo} against an already-populated catalog would simply
+ *       re-upsert the same 703 rows, not double them.</li>
+ *   <li><b>{@code ImportProducts} with {@code ReconciliationMode.FULL}</b>
+ *       (not used by this module, which leaves the default) - calculates a
+ *       diff against the ENTIRE existing dataset and replaces it: anything
+ *       in the branch that ISN'T present in the new import batch gets
+ *       DELETED. The real tool for "make the catalog exactly match this
+ *       snapshot," genuinely destructive if pointed at a partial batch by
+ *       mistake - worth knowing exists before ever switching off the
+ *       INCREMENTAL default.</li>
+ * </ul>
+ * The practical takeaway: there is no failure mode where re-importing
+ * overlapping data silently creates duplicate entries under either mode -
+ * "duplicate" products in this API's data model can only happen if two
+ * DIFFERENT ids are assigned to what's conceptually the same product (a
+ * generator/pipeline bug on the caller's side), never from the API's own
+ * import/create semantics.
+ *
  * <h2>Catalog import: 703 synthetic products (2026-08-31)</h2>
  * {@link ProductCatalogGenerator} builds a realistic local-supermarket
  * catalog (fictional brands, no real retailer named) - groceries, dairy,
