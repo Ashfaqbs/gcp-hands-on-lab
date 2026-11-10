@@ -262,7 +262,7 @@ Learning to rank changes ranking automatically from user events. A boost rule is
 
 Code is in the `toystore` package. The flow is UI, then our backend, then the Retail API.
 
-Step 1: the UI calls our backend (`index.html`).
+Step 1: the UI calls our backend (`index.html`, kept in `src/main/resources/static/ai-commerce-search/`).
 
 - Search is a GET with no body, for example `GET /api/toys/search?q=toy&visitorId=user1`. The backend answers with JSON: `query`, `attributionToken`, and `results` (each with `id`, `title`, `price`, `brand`, `category`). The page keeps the attribution token in a variable.
 - Every shopper action is a `POST /api/events` with a JSON body: `eventType`, `visitorId`, `attributionToken`, `productId` and `searchQuery`. For a search event `productId` is null and `searchQuery` is set. Valid event types are `search`, `detail-page-view`, `add-to-cart` and `purchase-complete`. Anything else returns HTTP 400.
@@ -307,7 +307,7 @@ The flow we built, in one line: the shopper clicks a button in the UI, the UI ca
 
 What we did:
 
-- Used the UI (`http://localhost:8080/`) as five shoppers, `user1` to `user5`, and clicked view, add to cart and buy.
+- Used the UI (`http://localhost:8080/ai-commerce-search/index.html`) as five shoppers, `user1` to `user5`, and clicked view, add to cart and buy.
 - Ran `ToyUserSimulator events 200`. It ran 200 sessions: 200 views, 101 add-to-carts and 47 purchases, with toy-2 as the favourite.
 - Our own history file `search-experiments/toy-events.tsv` ended at 583 events. For toy-2 it holds 144 views, 73 add-to-carts and 34 purchases. The next toy, toy-5, has 28 views.
 
@@ -393,7 +393,7 @@ The seller's catch: each step needs more shoppers. Our store has 20 toys and 5 f
 
 All code is in the `toystore` package of this module. Use the system `mvn`, not `./mvnw`.
 
-- Web page: `mvn -q exec:java -Dexec.mainClass=com.ashfaq.gcplab._09_ai_commerce_search.toystore.ToyStoreApplication`, then open `http://localhost:8080/`. After editing `index.html`, run `mvn -q process-resources` so the copy in `target/classes/static` is updated.
+- Web page: `mvn -q exec:java -Dexec.mainClass=com.ashfaq.gcplab._09_ai_commerce_search.toystore.ToyStoreApplication`, then open `http://localhost:8080/ai-commerce-search/index.html`. The page lives in `src/main/resources/static/ai-commerce-search/` because Spring Boot serves web files only from the classpath `static` folder. After editing it, run `mvn -q process-resources` so the copy in `target/classes/static` is updated.
 - Simulator, print the ranking only: `mvn -q exec:java -Dexec.mainClass=com.ashfaq.gcplab._09_ai_commerce_search.toystore.ToyUserSimulator -Dexec.args="rank"`.
 - Simulator, send events: the same command with `-Dexec.args="events 200"`.
 - If the web server fails with "Port 8080 was already in use", an old Java process is still running. Stop it (for example with `Stop-Process -Id <pid> -Force` in PowerShell) and start again.
