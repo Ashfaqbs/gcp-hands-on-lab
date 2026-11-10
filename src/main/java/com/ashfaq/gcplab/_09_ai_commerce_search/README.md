@@ -416,16 +416,20 @@ At 703 products and a handful of test queries, the cost in this project was negl
 
 Any retailer or marketplace with a product catalog that already runs on Google Cloud and wants good search and recommendations without building and tuning its own search stack. The usual flow is: sync the product list into the service, send shopper events as they happen, and call the search API from the website or app.
 
-## What are the gaps in our understanding so far?
+## What did we leave untested, and what is the cleanup state?
 
-- Why the Console Events tab and the Data quality page show no event statistics, although Monitoring shows the events arriving.
-- Whether ranking changes once the event volume is large enough. Re-run `ToyUserSimulator rank` later and compare with toy-2 at position 8.
-- Product impressions: add the list of shown products to search events.
-- Why only 10 of the 20 toys come back for the query "toy", and why the count varies between 10 and 11.
-- Which wins when a per-product attribute flag and the Attribute Controls page disagree. Test Searchable on `attributes.age_range` with a re-import.
-- Serving configs and controls: boost, bury, filter and pin rules (nothing created yet).
-- Recommendation models: training, types and cost.
-- A real cost model for production volumes, and whether the free-trial credit and its end date hold (unverified).
-- Whether Gemini on top (query understanding or reranking) can close the quality gap, which is the Vertex AI for search item in `TODO.md`.
-- The Console message `Failed to get full branch details`.
-- Cleanup when done: purge the toy products.
+Cleanup: the catalog was purged on 2026-11-10 with `CatalogPurgeDemo` (all products in branch 0). A search for "toy" right after returned no results. The purge removes products only. The user events we sent stay in the event store, and the API has no list call for them. The service bills for usage (search requests), so an empty catalog with no traffic should cost nothing more, but this was not checked on the billing page.
+
+Left untested on purpose, because we moved on to other GCP services. Each one is safe to skip for the concepts, and each is a small job later:
+
+- Ranking after events: re-run `ToyUserSimulator rank` after loading the toys again. Expected to stay at position 8, because our event volume is far below Tier 2.
+- Product impressions: search events do not yet list the products shown, which Tier 2 checks.
+- Result count: only 10 of the 20 toys came back for "toy", and the count varied between 10 and 11. Not explained.
+- Attribute flags: a product can carry `searchable` and `indexable` itself, and the Attribute Controls page has the same switches. Which one wins is unknown. A test would be to set Searchable on `attributes.age_range`, re-import, and search "3+".
+- Serving controls: boost, bury, filter and pin rules. Read about, never created. These are the only way to force a ranking before you have traffic.
+- Product edits: `ToyAddDemo` (adds toy-21) and `ToyEditDemo` (updates toy-3, deletes toy-21) are written and compiled, but never run. Code was read and looks right. Note that "delete" fails unless toy-21 was added first.
+- Branch switching: loading a new version into another branch and making it the default. Described, never tried. It is only a slot change.
+- Recommendations: models, types and cost. The flow is understood, nothing was built.
+- Cost: no real model for production volumes. Whether the free-trial credit and its end date hold is unverified.
+- Console oddities: the message `Failed to get full branch details`, and the empty Events tab, were not investigated.
+- Gemini on top (query understanding or reranking) as a way to close the quality gap, which is the Vertex AI for search item in `TODO.md`.
