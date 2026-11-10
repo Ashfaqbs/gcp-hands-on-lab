@@ -1,4 +1,4 @@
-package com.ashfaq.gcplab._08_vertexai;
+package com.ashfaq.gcplab._08_genai;
 
 import com.google.genai.Client;
 import com.google.genai.types.ContentEmbedding;
@@ -30,7 +30,7 @@ import java.util.Map;
  *    mechanically.
  *
  * Run with:
- *   mvn exec:java -Dexec.mainClass=com.ashfaq.gcplab._08_vertexai.SimpleRagDemo
+ *   mvn exec:java -Dexec.mainClass=com.ashfaq.gcplab._08_genai.SimpleRagDemo
  */
 public final class SimpleRagDemo {
 

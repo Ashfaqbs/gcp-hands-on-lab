@@ -7,7 +7,7 @@
  * Agent Builder together and rebranded the whole thing. Searching "Vertex
  * AI" in Console now redirects to Gemini Enterprise - the old name no
  * longer resolves to its own product page. Package name kept as
- * {@code _08_vertexai} anyway since that's still the concept/capability
+ * {@code _08_genai} anyway since that's still the concept/capability
  * being learned (and what most existing tutorials/docs still call it),
  * just noting the rename so it's not confusing when Console doesn't match
  * older material.
@@ -652,4 +652,4 @@
  * module's separate {@code main()} demos naturally does since each CLI
  * invocation IS the process lifetime.
  */
-package com.ashfaq.gcplab._08_vertexai;
+package com.ashfaq.gcplab._08_genai;

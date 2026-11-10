@@ -93,7 +93,7 @@
 			<groupId>com.google.cloud</groupId>
 			<artifactId>google-cloud-bigquerydatatransfer</artifactId>
 		</dependency>
-		<!-- _08_vertexai (GeminiPromptDemo, SimpleRagDemo, SimpleAgentDemo) -
+		<!-- _08_genai (GeminiPromptDemo, SimpleRagDemo, SimpleAgentDemo) -
 		     the modern unified Gemini SDK, NOT covered by libraries-bom,
 		     hence the explicit <version> pin. -->
 		<dependency>

@@ -1,4 +1,4 @@
-package com.ashfaq.gcplab._08_vertexai;
+package com.ashfaq.gcplab._08_genai;
 
 import com.google.auth.oauth2.GoogleCredentials;
 import com.google.auth.oauth2.ImpersonatedCredentials;
@@ -14,7 +14,7 @@ import java.util.List;
  * dataMlEngineer custom role from _01_iam, first real use of that role).
  *
  * Run with:
- *   mvn exec:java -Dexec.mainClass=com.ashfaq.gcplab._08_vertexai.GeminiPromptDemo
+ *   mvn exec:java -Dexec.mainClass=com.ashfaq.gcplab._08_genai.GeminiPromptDemo
  */
 public final class GeminiPromptDemo {
 

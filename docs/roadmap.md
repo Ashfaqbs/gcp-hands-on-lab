@@ -5,7 +5,7 @@ or re-planning. Three threads, roughly independent, pick any order.
 
 ## Track A: "Rufus clone" - conversational shopping assistant (capstone)
 
-Ties `_08_vertexai` and `_09_ai_commerce_search` together - the two pieces
+Ties `_08_genai` and `_09_ai_commerce_search` together - the two pieces
 already exist separately, this wires them into one thing.
 
 **Plan:**

@@ -570,7 +570,7 @@
  * a client managing its own HTTP transport - one instance for a service's
  * lifetime (a Spring {@code @Bean}), never per-request, the same "build
  * once, reuse everywhere" rule already stated for every other GCP client
- * in this repo ({@code _06_firestore}, {@code _08_vertexai},
+ * in this repo ({@code _06_firestore}, {@code _08_genai},
  * {@code _09_ai_commerce_search}, {@code _11_spanner}) - this module's
  * separate {@code main()}-per-CLI-invocation demos each build their own
  * client only because each run IS the whole process lifetime.

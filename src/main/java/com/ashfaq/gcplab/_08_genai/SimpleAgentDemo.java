@@ -1,4 +1,4 @@
-package com.ashfaq.gcplab._08_vertexai;
+package com.ashfaq.gcplab._08_genai;
 
 import com.google.genai.Client;
 import com.google.genai.types.Content;
@@ -34,7 +34,7 @@ import java.util.Map;
  * 5. Model produces a final text answer using the tool's result.
  *
  * Run with:
- *   mvn exec:java -Dexec.mainClass=com.ashfaq.gcplab._08_vertexai.SimpleAgentDemo
+ *   mvn exec:java -Dexec.mainClass=com.ashfaq.gcplab._08_genai.SimpleAgentDemo
  */
 public final class SimpleAgentDemo {
 
