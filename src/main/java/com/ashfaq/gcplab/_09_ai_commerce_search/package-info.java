@@ -1,8 +1,8 @@
 /**
- * Reading order: 09 (comes after _01_iam ... _08_vertexai).
+ * Reading order: 09 (comes after _01_iam ... _08_genai).
  *
- * <h2>NOT the same product as _08_vertexai</h2>
- * {@code _08_vertexai} (Agent Platform, formerly Vertex AI) is a
+ * <h2>NOT the same product as _08_genai</h2>
+ * {@code _08_genai} (Agent Platform, formerly Vertex AI) is a
  * general-purpose LLM platform - any prompt, any use case, build your own
  * RAG/agents from primitives (which is exactly what we did there). THIS
  * package is a separate, purpose-built retail product: catalog in, ranked
@@ -70,7 +70,7 @@
  * <table border="1">
  *   <tr><th>Layer</th><th>What we built elsewhere</th><th>What real retail companies use</th></tr>
  *   <tr><td>Raw catalog storage</td><td>_03_storage (GCS) / _04_cloudsql / _06_firestore</td><td>Same</td></tr>
- *   <tr><td>Semantic retrieval</td><td>_08_vertexai's SimpleRagDemo - hand-rolled embed+retrieve+prompt</td><td>THIS package - managed: Google's ranking, facets, business rules built in</td></tr>
+ *   <tr><td>Semantic retrieval</td><td>_08_genai's SimpleRagDemo - hand-rolled embed+retrieve+prompt</td><td>THIS package - managed: Google's ranking, facets, business rules built in</td></tr>
  *   <tr><td>Keyword/faceted search</td><td>Not yet built</td><td>Elasticsearch (self-hosted) OR this package's built-in faceted search - genuinely competing options</td></tr>
  *   <tr><td>Caching</td><td>_05_redis</td><td>Same - Memorystore in front of the search API for hot queries</td></tr>
  *   <tr><td>Personalization</td><td>Not applicable (no event history)</td><td>Recommendations - needs real traffic</td></tr>
@@ -137,7 +137,7 @@
  * rather than assumed. Internally, yes, there IS a ranking/similarity model
  * involved (the {@code modelScores} field discussed above is evidence a
  * scoring model runs) - but "similarity search" usually implies EMBEDDING-
- * based semantic matching (the way {@code _08_vertexai}'s {@code
+ * based semantic matching (the way {@code _08_genai}'s {@code
  * SimpleRagDemo} does cosine-similarity over embedding vectors), and this
  * module's own audit found the DEFAULT configuration behaves much more like
  * literal keyword/token matching than true semantic similarity - it
@@ -289,7 +289,7 @@
  * Vertex AI Search's embedding/semantic layer (and this product's own
  * "conversational search" / query-understanding features, not enabled
  * here) are specifically built to close - and exactly what our hand-rolled
- * RAG in {@code _08_vertexai}'s SimpleRagDemo does manually for a much
+ * RAG in {@code _08_genai}'s SimpleRagDemo does manually for a much
  * smaller document set.
  *
  * <h2>Pricing - formula and worked examples</h2>
@@ -476,7 +476,7 @@
  *       baseline first.</li>
  *   <li><b>Feeding a conversational shopping assistant</b> - exactly
  *       docs/roadmap.md's Track A ("Rufus clone"): an LLM agent
- *       ({@code _08_vertexai}'s agent-loop pattern) calling THIS service's
+ *       ({@code _08_genai}'s agent-loop pattern) calling THIS service's
  *       search endpoint as a tool, so the assistant's product knowledge is
  *       always the real, current catalog rather than the model's own
  *       (possibly stale, possibly hallucinated) training knowledge.</li>
@@ -664,7 +664,7 @@
  *       the Scale limits table above, e.g. 300 searches/minute default) -
  *       request a quota increase via Console -&gt; IAM &amp; Admin -&gt;
  *       Quotas for anything genuinely busier, same pattern as
- *       {@code _08_vertexai}'s quota-error guidance.</li>
+ *       {@code _08_genai}'s quota-error guidance.</li>
  *   <li>A product imported successfully (visible via GetProduct) but never
  *       appears in search results - almost always the indexing-propagation
  *       delay noted in "Internal architecture" above (import and
@@ -932,7 +932,7 @@
  * should request quota increases and load-test the integration well
  * BEFORE the event, not discover a quota ceiling live during it; this is
  * the same "request increases proactively" discipline noted for
- * {@code _08_vertexai}'s rate limits, applied to Search's own quotas.
+ * {@code _08_genai}'s rate limits, applied to Search's own quotas.
  *
  * <p><b>8. Code-level habit: reuse client instances, same rule as every
  * other module.</b> {@code ProductServiceClient}/{@code
@@ -940,7 +940,7 @@
  * {@code AutoCloseable}, gRPC-channel-backed clients - build ONE of each
  * for a service's lifetime (a Spring {@code @Bean}), never per-request,
  * same "build once, reuse everywhere" rule already stated for {@code
- * _06_firestore}, {@code _08_vertexai}, and {@code _11_spanner}'s clients -
+ * _06_firestore}, {@code _08_genai}, and {@code _11_spanner}'s clients -
  * this module's separate {@code main()}-per-CLI-invocation demos each
  * construct their own client because each run IS the whole process
  * lifetime, which is the right shape for a one-shot demo and the wrong

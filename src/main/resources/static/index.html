@@ -1,0 +1,121 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Toy store</title>
+</head>
+<body>
+<h3>Toy store (plain test page)</h3>
+
+<p>
+  Shopper:
+  <select id="visitor">
+    <option>user1</option><option>user2</option><option>user3</option>
+    <option>user4</option><option>user5</option>
+  </select>
+  Search:
+  <input id="query" value="toy">
+  <button onclick="doSearch()">Search</button>
+</p>
+
+<p id="status"></p>
+<ol id="results"></ol>
+
+<h4>Event history (events we sent to Vertex, newest first)</h4>
+<p>
+  <label><input type="checkbox" id="allUsers" onchange="loadHistory()"> show all shoppers</label>
+  <button onclick="loadHistory()">refresh</button>
+</p>
+<table border="1" cellpadding="3">
+  <thead><tr><th>time</th><th>shopper</th><th>event</th><th>product</th><th>query</th></tr></thead>
+  <tbody id="history"></tbody>
+</table>
+<pre id="log"></pre>
+
+<script>
+let attributionToken = "";
+let lastQuery = "";
+
+function visitor() { return document.getElementById("visitor").value; }
+function log(line) {
+  const el = document.getElementById("log");
+  el.textContent = new Date().toLocaleTimeString() + " " + line + "\n" + el.textContent;
+}
+
+async function sendEvent(eventType, productId) {
+  const body = {
+    eventType: eventType,
+    visitorId: visitor(),
+    attributionToken: attributionToken,
+    productId: productId || null,
+    searchQuery: eventType === "search" ? lastQuery : null
+  };
+  const res = await fetch("/api/events", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  log(visitor() + " " + eventType + (productId ? " " + productId : "") + " -> " + res.status);
+  loadHistory();
+}
+
+async function loadHistory() {
+  const all = document.getElementById("allUsers").checked;
+  const res = await fetch("/api/events/history?visitorId=" + (all ? "" : visitor()));
+  const rows = await res.json();
+  const body = document.getElementById("history");
+  body.innerHTML = "";
+  rows.forEach(function (row) {
+    const tr = document.createElement("tr");
+    [new Date(row.time).toLocaleString(), row.visitorId, row.eventType, row.productId, row.searchQuery]
+      .forEach(function (value) {
+        const td = document.createElement("td");
+        td.textContent = value;
+        tr.appendChild(td);
+      });
+    body.appendChild(tr);
+  });
+}
+
+document.getElementById("visitor").addEventListener("change", function () {
+  attributionToken = "";
+  document.getElementById("results").innerHTML = "";
+  document.getElementById("status").textContent = "shopper changed: search again so this shopper gets their own token";
+  loadHistory();
+});
+loadHistory();
+
+async function doSearch() {
+  lastQuery = document.getElementById("query").value;
+  const url = "/api/toys/search?q=" + encodeURIComponent(lastQuery) + "&visitorId=" + visitor();
+  const res = await fetch(url);
+  if (!res.ok) {
+    document.getElementById("status").textContent = "search failed: HTTP " + res.status;
+    return;
+  }
+  const data = await res.json();
+  attributionToken = data.attributionToken;
+  document.getElementById("status").textContent =
+    data.results.length + " results for '" + data.query + "' (attribution token kept for the events below)";
+  const list = document.getElementById("results");
+  list.innerHTML = "";
+  data.results.forEach(function (toy) {
+    const li = document.createElement("li");
+    const text = document.createElement("span");
+    text.textContent = toy.id + " | " + toy.title + " | " + toy.brand + " | " + toy.price + " INR ";
+    li.appendChild(text);
+    [["detail-page-view", "view"], ["add-to-cart", "add to cart"], ["purchase-complete", "buy"]]
+      .forEach(function (action) {
+        const button = document.createElement("button");
+        button.textContent = action[1];
+        button.addEventListener("click", function () { sendEvent(action[0], toy.id); });
+        li.appendChild(button);
+        li.appendChild(document.createTextNode(" "));
+      });
+    list.appendChild(li);
+  });
+  await sendEvent("search", null);
+}
+</script>
+</body>
+</html>
