@@ -10,7 +10,7 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
  * this package.
  *
  * Run: mvn exec:java -Dexec.mainClass=com.ashfaq.gcplab._09_ai_commerce_search.toystore.ToyStoreApplication
- * Then open http://localhost:8080/
+ * Then open http://localhost:8080/ai-commerce-search/index.html
  */
 @SpringBootApplication(excludeName = {
         "org.springframework.boot.jdbc.autoconfigure.DataSourceAutoConfiguration",
