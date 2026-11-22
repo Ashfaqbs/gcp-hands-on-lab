@@ -38,3 +38,7 @@ build/
 *.pem
 *.key
 *credentials*.json
+
+# local tooling and experiment output
+apache-maven-3.9.16/
+search-experiments/toy-events.tsv
